@@ -31,10 +31,30 @@ jobs:
         run: |
           $version = (Select-String -Path "businessdesk.py" -Pattern "^VERSION = '([0-9.]+)'" ).Matches.Groups[1].Value
           if ("v$version" -ne "${{ github.ref_name }}") { throw "Tag ${{ github.ref_name }} does not match app version v$version" }
+      - name: Validate updater PowerShell syntax
+        shell: pwsh
+        run: |
+          foreach ($scriptName in @('update_installer.ps1','repair_from_github.ps1')) {
+            $tokens = $null
+            $parseErrors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $scriptName).Path,[ref]$tokens,[ref]$parseErrors) | Out-Null
+            if ($parseErrors -and $parseErrors.Count -gt 0) {
+              foreach ($problem in $parseErrors) { Write-Error "$scriptName : $problem" }
+              throw "PowerShell syntax failure in $scriptName"
+            }
+          }
       - name: Build Windows EXE
         shell: pwsh
         run: |
-          python -m PyInstaller --noconfirm --clean --onefile --windowed --name TDZIGNS_BusinessDesk --collect-all reportlab --collect-all PIL --collect-all openpyxl --hidden-import excel_import --add-data "update_installer.ps1;." businessdesk.py
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name TDZIGNS_BusinessDesk --collect-all reportlab --collect-all PIL --collect-all openpyxl --hidden-import excel_import --add-data "update_installer.ps1;." launcher.py
+      - name: Smoke-test compiled Windows EXE
+        shell: pwsh
+        run: |
+          $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP 'BusinessDeskSmoke'
+          New-Item -ItemType Directory -Path $env:LOCALAPPDATA -Force | Out-Null
+          $exe = (Resolve-Path 'dist/TDZIGNS_BusinessDesk.exe').Path
+          $proc = Start-Process -FilePath $exe -ArgumentList '--smoke-test' -PassThru -Wait
+          if ($proc.ExitCode -ne 0) { throw "Windows EXE smoke test exited with code $($proc.ExitCode)" }
       - name: Package release
         shell: pwsh
         run: python package_release.py
