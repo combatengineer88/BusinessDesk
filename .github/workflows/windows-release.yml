@@ -1,4 +1,4 @@
-name: Build BusinessDesk Windows Update
+name: Build and Publish BusinessDesk Updates
 
 on:
   workflow_dispatch:
@@ -16,25 +16,29 @@ jobs:
       run:
         working-directory: TDZIGNS_BusinessDesk_v2.7_Automated_Windows_Build
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install requirements
+      - name: Install dependencies
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pyinstaller
-      - name: Build Windows application
+      - name: Validate tag and app version
+        if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         run: |
-          python -m PyInstaller --noconfirm --clean --onefile --windowed --name TDZIGNS_BusinessDesk --collect-all reportlab --collect-all PIL --hidden-import excel_import --add-data "update_installer.ps1;." businessdesk.py
-      - name: Package update ZIP
+          $version = (Select-String -Path "businessdesk.py" -Pattern "^VERSION = '([0-9.]+)'" ).Matches.Groups[1].Value
+          if ("v$version" -ne "${{ github.ref_name }}") { throw "Tag ${{ github.ref_name }} does not match app version v$version" }
+      - name: Build Windows EXE
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name TDZIGNS_BusinessDesk --collect-all reportlab --collect-all PIL --collect-all openpyxl --hidden-import excel_import --add-data "update_installer.ps1;." businessdesk.py
+      - name: Package release
         shell: pwsh
         run: python package_release.py
-      - name: Upload ready-to-install update
+      - name: Upload installable build
         uses: actions/upload-artifact@v4
         with:
           name: BusinessDesk-Windows-Update
@@ -43,10 +47,12 @@ jobs:
             TDZIGNS_BusinessDesk_v2.7_Automated_Windows_Build/TDZIGNS_BusinessDesk_*.sha256
             TDZIGNS_BusinessDesk_v2.7_Automated_Windows_Build/update_manifest.json
           if-no-files-found: error
-      - name: Publish GitHub release when tagged
+      - name: Publish stable release
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.ref_name }}" TDZIGNS_BusinessDesk_*.zip TDZIGNS_BusinessDesk_*.sha256 --title "BusinessDesk ${{ github.ref_name }}" --generate-notes
+          $version = (Select-String -Path "businessdesk.py" -Pattern "^VERSION = '([0-9.]+)'" ).Matches.Groups[1].Value
+          if ("v$version" -ne "${{ github.ref_name }}") { throw "Incorrect version" }
+          gh release create "${{ github.ref_name }}" "TDZIGNS_BusinessDesk_$version.zip" "TDZIGNS_BusinessDesk_$version.sha256" update_manifest.json --title "BusinessDesk v$version" --generate-notes --latest
