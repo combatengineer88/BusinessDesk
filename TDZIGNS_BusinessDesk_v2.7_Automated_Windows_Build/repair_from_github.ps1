@@ -66,10 +66,10 @@ try {
   if ([IO.Path]::GetFileName($target) -ine 'TDZIGNS_BusinessDesk.exe') {throw 'Select the currently installed BusinessDesk executable.'}
 
   $manifestUrl='https://github.com/combatengineer88/BusinessDesk/releases/latest/download/update_manifest.json'
-  $manifest=Invoke-RestMethod -Uri $manifestUrl -TimeoutSec 30 -Headers @{'User-Agent'='TDZIGNS-BusinessDesk-Recovery/2.9.1'}
+  $manifest=Invoke-RestMethod -Uri $manifestUrl -TimeoutSec 30 -Headers @{'User-Agent'='TDZIGNS-BusinessDesk-Recovery/2.9.4'}
   $version=[string]$manifest.version
-  if ($version -notmatch '^\d+\.\d+\.\d+$' -or [version]$version -lt [version]'2.9.1') {
-    throw 'The repaired v2.9.1 update has not been published yet. Upload the source to GitHub, push tag v2.9.1, and wait for the release to finish.'
+  if ($version -notmatch '^\d+\.\d+\.\d+$' -or [version]$version -lt [version]'2.9.4') {
+    throw 'The repaired v2.9.4 release is not available yet. Commit the v2.9.4 source, push tag v2.9.4 and wait for GitHub Actions to finish.'
   }
   $expectedUrl='https://github.com/combatengineer88/BusinessDesk/releases/download/v'+$version+'/TDZIGNS_BusinessDesk_'+$version+'.zip'
   if ([string]$manifest.url -cne $expectedUrl) {throw 'Update URL is not the expected official GitHub release path.'}
@@ -80,7 +80,7 @@ try {
   Notify ('Downloading official BusinessDesk '+$version+' update from GitHub.'+"`r`n"+
       'The installer will reopen BusinessDesk after completing the update.')
   try {
-    Invoke-WebRequest -Uri $expectedUrl -UseBasicParsing -OutFile $part -TimeoutSec 180 -Headers @{'User-Agent'='TDZIGNS-BusinessDesk-Recovery/2.9.1'}
+    Invoke-WebRequest -Uri $expectedUrl -UseBasicParsing -OutFile $part -TimeoutSec 180 -Headers @{'User-Agent'='TDZIGNS-BusinessDesk-Recovery/2.9.4'}
     if ((Get-Item -LiteralPath $part).Length -gt 200MB) {throw 'Downloaded package exceeds the 200 MB update limit.'}
     if ((Get-FileHash -LiteralPath $part -Algorithm SHA256).Hash -ine $digest) {throw 'Checksum mismatch: the downloaded ZIP was rejected.'}
     Move-Item -LiteralPath $part -Destination $download -Force

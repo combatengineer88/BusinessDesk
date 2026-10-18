@@ -13,7 +13,7 @@ from sales_workflow import convert_estimate, record_invoice_payment
 from supplier_catalog import supplier_choices, products_for_supplier, create_supplier_po, validate_supplier_rows
 from update_support import read_status, signal_ready, STATUS_NAME
 
-VERSION = '2.9.3'
+VERSION = '2.9.4'
 BUSINESS = 'TDZIGNS LLC'
 RELEASE_MANIFEST_URL = 'https://github.com/combatengineer88/BusinessDesk/releases/latest/download/update_manifest.json'
 TRUSTED_RELEASE_PREFIX = 'https://github.com/combatengineer88/BusinessDesk/releases/download/'
@@ -1075,6 +1075,7 @@ class BusinessDesk(BaseApp):
         if not (getattr(sys,'frozen',False) and sys.platform=='win32'):
             raise ValueError('Automatic installation is only supported from the packaged Windows EXE.')
         if self.user['role']!='admin':raise PermissionError('Administrator login required.')
+        if getattr(self,'_updating',False):raise RuntimeError('An update is already being prepared.')
         executable=Path(sys.executable).resolve()
         if executable.name.lower()!='tdzigns_businessdesk.exe':
             raise ValueError('Unexpected executable name; cannot safely replace it.')
@@ -1104,15 +1105,62 @@ class BusinessDesk(BaseApp):
         args=['powershell.exe','-NoProfile','-NonInteractive','-STA','-ExecutionPolicy','Bypass',
               '-File',str(helper),'-Package',str(package),'-Target',str(executable),
               '-ProcessIdToWait',str(os.getpid()),'-DataDir',str(DATA),'-ExpectedSha256',digest,'-Version',str(version if re.fullmatch(r'\d+\.\d+\.\d+',str(version)) else '')]
-        flags=getattr(subprocess,'CREATE_NO_WINDOW',0)|getattr(subprocess,'DETACHED_PROCESS',0)
+        # Keep this GUI running until the installer has VALIDATED and unpacked
+        # the update. Previously, merely starting PowerShell closed the app,
+        # even when that installer failed before doing any useful work.
+        attempt=uuid.uuid4().hex
+        handoff=updates/('handoff_'+attempt+'.ready')
+        args.extend(['-HandoffFile',str(handoff),'-AttemptId',attempt])
+        status['attempt_id']=attempt
+        (updates/STATUS_NAME).write_text(json.dumps(status,indent=2),encoding='utf-8')
+        # Permanent manual escape hatch if restarting ever fails on this PC.
+        # The EXE stays in its original path; the updater does not install elsewhere.
+        manual=updates/'Reopen BusinessDesk.cmd'
+        manual.write_text('@echo off\nstart "" "'+str(executable)+'"\n',encoding='utf-8')
+        # A normal, visible console avoids silent DETACHED_PROCESS failures.
+        # The updater and its error messages remain visible while it runs.
+        flags=getattr(subprocess,'CREATE_NEW_CONSOLE',0)
         try:
-            subprocess.Popen(args,creationflags=flags,close_fds=True)
+            worker=subprocess.Popen(args,creationflags=flags,close_fds=True)
         except OSError as exc:
             (updates/STATUS_NAME).write_text(json.dumps({**status,'status':'failed','message':str(exc)},indent=2),encoding='utf-8')
-            raise RuntimeError('Could not launch the updater. BusinessDesk has not been closed: '+str(exc)) from exc
-        # Ensure the sqlite file is released before the updater waits for this PID.
-        self.db.commit()
-        self.db.close()
-        self.root.destroy()
+            raise RuntimeError('Could not start PowerShell updater; BusinessDesk is still open: '+str(exc)) from exc
+        self._updating=True
+        self._update_worker=worker
+        self._update_handoff=handoff
+        self._update_attempt=attempt
+        self._update_deadline=datetime.now().timestamp()+75
+        self._poll_update_handoff()
+
+    def _poll_update_handoff(self):
+        # Tk's mainloop continues to run while the helper verifies the package.
+        # This cannot deadlock with PowerShell's wait on the parent process.
+        marker=self._update_handoff
+        if marker.is_file():
+            try:
+                if marker.read_text(encoding='utf-8-sig').strip()!='PREPARED':
+                    raise ValueError('Unexpected updater handoff confirmation')
+                marker.unlink(missing_ok=True)
+                self.db.commit()
+                self.db.close()
+                self.root.destroy()
+            except Exception as exc:
+                self._updating=False
+                messagebox.showerror('Update handoff error',str(exc))
+            return
+        status=read_status(DATA) or {}
+        if status.get('attempt_id')==self._update_attempt and status.get('status') in ('failed','rollback_failed'):
+            reason=status.get('message','Update could not be prepared.')
+            self._updating=False
+            messagebox.showerror('Update failed — app remains open',reason+'\n\nSee: '+str(DATA/'updates'/'installation.log'))
+            return
+        code=self._update_worker.poll()
+        if code is not None or datetime.now().timestamp()>=self._update_deadline:
+            self._updating=False
+            reason=('Installer exited with code '+str(code) if code is not None else
+                    'Installer did not confirm that the package was ready within 75 seconds.')
+            messagebox.showerror('Update could not start',reason+'\n\nBusinessDesk remains open. See: '+str(DATA/'updates'/'installation.log'))
+            return
+        self.root.after(250,self._poll_update_handoff)
 
 if __name__=='__main__':BusinessDesk().run()

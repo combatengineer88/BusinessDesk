@@ -1,4 +1,4 @@
-TDZIGNS LLC BUSINESSDESK - UPDATER REPAIR (v2.9.1)
+TDZIGNS LLC BUSINESSDESK - UPDATER REPAIR (v2.9.4)
 ===================================================
 
 Your installed BusinessDesk might close during an update without reopening.
@@ -7,7 +7,7 @@ The old hidden updater can also fail without showing an error.
 BEFORE DOING ANYTHING:
 1. Back up %LOCALAPPDATA%\BusinessDesk\business.db (close BusinessDesk first).
 2. Do NOT delete your %LOCALAPPDATA%\BusinessDesk folder.
-3. The repair from GitHub requires v2.9.1 or newer to be PUBLISHED
+3. The repair from GitHub requires v2.9.4 or newer to be PUBLISHED
    under https://github.com/combatengineer88/BusinessDesk/releases .
 
 ONE-TIME REPAIR:
@@ -35,6 +35,6 @@ Backup EXEs:     %LOCALAPPDATA%\BusinessDesk\updates\backup_*
 
 Double-click show_update_log.bat to open the log in Notepad.
 
-If there is no published release v2.9.1 yet, publish it using the GitHub
+If there is no published release v2.9.4 yet, publish it using the GitHub
 repository update package first. A source-code ZIP cannot install itself.
 This repair process requires a Windows computer and Internet access.

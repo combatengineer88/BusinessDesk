@@ -246,3 +246,8 @@ Example Excel headers and rows:
 **Update delivery:** Upload the source files inside the `TDZIGNS_BusinessDesk_v2.7_Automated_Windows_Build/` folder to the same folder in your GitHub repository and overwrite the older files. Keep the workflow at the repository root under `.github/workflows/windows-release.yml`. Commit changes, then push `v2.9.3`; GitHub Actions produces the compiled Windows ZIP in Releases. Users can install it from BusinessDesk's GitHub updater. Do **not** select this *source* ZIP in the updater.
 
 **Verification:** Database migration, product imports, supplier filtering, PO creation, and GUI supplier/product dropdown workflows were tested in Linux with a virtual display. Final Windows executable and update/install behavior must still be verified through GitHub Actions and on Windows.
+
+
+## v2.9.4 — Updater restart reliability
+
+See `UPDATE_RESTART_FIX_README.txt`. The update handoff now waits until the Windows installer has checked and unpacked the package before closing the GUI. Failed preparation leaves BusinessDesk open. PowerShell runs in a visible console. A manual restart launcher is saved under `%LOCALAPPDATA%\BusinessDesk\updates\Reopen BusinessDesk.cmd`. The GitHub workflow includes a Windows installer preparation regression test. The standalone recovery kit includes `reopen_existing.bat` for immediately locating and launching an existing installation and `repair_from_github.bat` for installing the latest compiled release after it is published.

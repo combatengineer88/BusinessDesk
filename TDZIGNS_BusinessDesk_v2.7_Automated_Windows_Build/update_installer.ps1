@@ -1,4 +1,4 @@
-# TDZIGNS BusinessDesk v2.9.1 standalone updater.
+# TDZIGNS BusinessDesk v2.9.4 standalone updater.
 # Runs in a separate PowerShell process after the main application exits.
 param(
   [Parameter(Mandatory=$true)][string]$Package,
@@ -7,7 +7,10 @@ param(
   [Parameter(Mandatory=$true)][string]$DataDir,
   [Parameter(Mandatory=$true)][string]$ExpectedSha256,
   [string]$Version = '',
-  [switch]$AllowFreshInstall
+  [switch]$AllowFreshInstall,
+  [string]$HandoffFile = '',
+  [string]$AttemptId = '',
+  [switch]$PrepareOnly
 )
 $ErrorActionPreference = 'Stop'
 $updates = Join-Path $DataDir 'updates'
@@ -33,6 +36,7 @@ function Write-Status([string]$state, [string]$detail) {
     version = $Version
     target = $Target
     package = $Package
+    attempt_id = $AttemptId
     backup = $(if (Test-Path -LiteralPath $backupExe) { $backupExe } else { '' })
     updated_at = (Get-Date).ToString('s')
     log = $log
@@ -86,15 +90,6 @@ try {
   $actual = (Get-FileHash -LiteralPath $Package -Algorithm SHA256).Hash
   if ($actual -ine $ExpectedSha256) { throw 'Update SHA-256 checksum does not match; no application files were changed.' }
 
-  if ($ProcessIdToWait -gt 0) {
-    $running = Get-Process -Id $ProcessIdToWait -ErrorAction SilentlyContinue
-    if ($running) {
-      Write-Status 'waiting' 'Waiting for BusinessDesk to exit before replacing the EXE.'
-      $running.WaitForExit(90000) | Out-Null
-      if (-not $running.HasExited) { throw 'BusinessDesk did not exit within 90 seconds.' }
-    }
-  }
-
   New-Item -ItemType Directory -Path $stage -Force | Out-Null
   if ([IO.Path]::GetExtension($Package) -ieq '.zip') {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -119,6 +114,32 @@ try {
     if ($exeStream.ReadByte() -ne 77 -or $exeStream.ReadByte() -ne 90) { throw 'The update is not a valid Windows executable.' }
     if ($exeStream.Length -lt 100000) { throw 'Update executable is unexpectedly small.' }
   } finally { $exeStream.Dispose() }
+
+  Write-Status 'prepared' ('Verified Windows update; installation location: ' + $Target)
+  if ($HandoffFile) {
+    $handoffFull=[IO.Path]::GetFullPath($HandoffFile)
+    $updatesFull=[IO.Path]::GetFullPath($updates)
+    if ([IO.Path]::GetDirectoryName($handoffFull) -ine $updatesFull -or
+        [IO.Path]::GetFileName($handoffFull) -notmatch '^handoff_[0-9a-f]{32}\.ready$') {
+      throw 'Refusing an unsafe updater handoff path.'
+    }
+    [IO.File]::WriteAllText($handoffFull, 'PREPARED', [Text.UTF8Encoding]::new($false))
+    Write-Log 'Handoff acknowledged; waiting for the old application to exit.'
+  }
+  # Used by CI to verify the release package, helper invocation, and handoff
+  # without changing a production executable or launching the GUI.
+  if ($PrepareOnly) {
+    Write-Status 'preflight_success' 'Update package verified and installation handoff acknowledged.'
+    return
+  }
+  if ($ProcessIdToWait -gt 0) {
+    $running = Get-Process -Id $ProcessIdToWait -ErrorAction SilentlyContinue
+    if ($running) {
+      Write-Status 'waiting' 'Waiting for BusinessDesk to close before replacing the EXE.'
+      $running.WaitForExit(90000) | Out-Null
+      if (-not $running.HasExited) { throw 'The original BusinessDesk process did not exit within 90 seconds.' }
+    }
+  }
 
   New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
   if ($hadPrevious) {
@@ -197,7 +218,8 @@ try {
   }
   Show-Error ('The BusinessDesk update could not be completed.' + "`r`n`r`n" + $failure + "`r`n`r`n" +
     'Expected installation location:' + "`r`n" + $Target + "`r`n`r`n" +
-    'Details:' + "`r`n" + $log + "`r`n`r`n" +
+    'Update log:' + "`r`n" + $log + "`r`n" +
+    'Startup errors:' + "`r`n" + (Join-Path $updates 'startup_errors.log') + "`r`n`r`n" +
     'The previous EXE was restored if possible. Your database was not removed.')
 } finally {
   Remove-Item -LiteralPath $readyFile -Force -ErrorAction SilentlyContinue
