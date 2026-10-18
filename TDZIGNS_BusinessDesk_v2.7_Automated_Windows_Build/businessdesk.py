@@ -11,7 +11,7 @@ from tkinter import ttk, messagebox, filedialog, simpledialog
 from core_v1 import App as BaseApp, DB, DATA, cents, money
 from sales_workflow import convert_estimate, record_invoice_payment
 
-VERSION = '2.8.0'
+VERSION = '2.9.0'
 BUSINESS = 'TDZIGNS LLC'
 RELEASE_MANIFEST_URL = 'https://github.com/combatengineer88/BusinessDesk/releases/latest/download/update_manifest.json'
 TRUSTED_RELEASE_PREFIX = 'https://github.com/combatengineer88/BusinessDesk/releases/download/'
@@ -45,6 +45,14 @@ def schema(db):
     cols={r[1] for r in db.execute('PRAGMA table_info(products)')}
     if 'image_path' not in cols: db.execute('ALTER TABLE products ADD COLUMN image_path TEXT DEFAULT \'\'')
     if 'barcode' not in cols: db.execute('ALTER TABLE products ADD COLUMN barcode TEXT DEFAULT \'\'')
+    columns={r[1] for r in db.execute('PRAGMA table_info(customers)')}
+    if 'tax_exempt' not in columns:
+        db.execute('ALTER TABLE customers ADD COLUMN tax_exempt INTEGER NOT NULL DEFAULT 0 CHECK(tax_exempt IN (0,1))')
+    db.execute("""CREATE TABLE IF NOT EXISTS customer_prices(
+        customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+        product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+        price INTEGER NOT NULL CHECK(price>=0),
+        PRIMARY KEY(customer_id,product_id))""")
     db.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_product_barcode ON products(barcode) WHERE barcode IS NOT NULL AND barcode != \'\'')
     db.executescript("""
     CREATE TRIGGER IF NOT EXISTS trg_invoice_journal AFTER INSERT ON documents
@@ -226,74 +234,88 @@ class BusinessDesk(BaseApp):
                                     (json.dumps(order),))
         except tk.TclError:pass
 
-    def select_document_products(self,kind):
-        """Modal searchable product list; returns (id,name,qty,unit_price,total) tuples."""
-        products=list(self.db.execute("SELECT id,sku,name,price,qty FROM products ORDER BY name,sku"))
+    def select_document_products(self,kind,customer_id=None):
+        products=list(self.db.execute('''SELECT p.id,p.sku,p.name,p.price,p.qty,cp.price AS special_price
+            FROM products p LEFT JOIN customer_prices cp ON cp.product_id=p.id AND cp.customer_id=?
+            ORDER BY p.name,p.sku''',(customer_id if customer_id is not None else -1,)))
         if not products:raise ValueError('Add products to the catalog first.')
-        dialog=tk.Toplevel(self.root)
-        dialog.title('Select products for '+kind)
-        dialog.transient(self.root)
-        dialog.geometry('850x560')
-        dialog.grab_set()
-        search=tk.StringVar()
-        top=ttk.Frame(dialog,padding=12);top.pack(fill='x')
-        ttk.Label(top,text='Search products by name or SKU').pack(anchor='w')
-        ttk.Entry(top,textvariable=search).pack(fill='x',pady=5)
-        ttk.Label(top,text='Double-click a product or select it and choose Add.').pack(anchor='w')
-        tree=ttk.Treeview(dialog,columns=('SKU','Name','Price','Stock'),show='headings',height=11)
-        for col,width in [('SKU',135),('Name',330),('Price',110),('Stock',90)]:
-            tree.heading(col,text=col);tree.column(col,width=width)
-        tree.pack(fill='both',expand=True,padx=12,pady=5)
-        qty=tk.StringVar(value='1')
-        controls=ttk.Frame(dialog,padding=8);controls.pack(fill='x')
+        win=tk.Toplevel(self.root);win.title('Select '+kind+' products');win.transient(self.root);win.grab_set();win.geometry('940x620')
+        search=tk.StringVar();qty=tk.StringVar(value='1');unit=tk.StringVar()
+        ttk.Label(win,text='Search name or SKU').pack(anchor='w',padx=12,pady=4)
+        ttk.Entry(win,textvariable=search).pack(fill='x',padx=12)
+        catalog=ttk.Treeview(win,columns=('SKU','Product','Catalog','Customer','Stock'),show='headings',height=10)
+        for col,width in [('SKU',130),('Product',320),('Catalog',100),('Customer',105),('Stock',75)]:
+            catalog.heading(col,text=col);catalog.column(col,width=width)
+        catalog.pack(fill='both',expand=True,padx=12,pady=8)
+        controls=ttk.Frame(win,padding=8);controls.pack(fill='x')
         ttk.Label(controls,text='Quantity').pack(side='left')
-        ttk.Entry(controls,textvariable=qty,width=8).pack(side='left',padx=8)
-        selected=[]
-        lines=ttk.Treeview(dialog,columns=('SKU','Name','Qty','Total'),show='headings',height=5)
-        for col in ('SKU','Name','Qty','Total'):
-            lines.heading(col,text=col)
-            lines.column(col,width=120 if col!='Name' else 320)
-        lines.pack(fill='both',expand=True,padx=12,pady=5)
+        ttk.Entry(controls,textvariable=qty,width=7).pack(side='left',padx=5)
+        ttk.Label(controls,text='Unit price ($)').pack(side='left')
+        ttk.Entry(controls,textvariable=unit,width=12).pack(side='left',padx=5)
+        lines=ttk.Treeview(win,columns=('SKU','Product','Qty','Unit','Total'),show='headings',height=6)
+        for col,width in [('SKU',125),('Product',325),('Qty',75),('Unit',100),('Total',100)]:
+            lines.heading(col,text=col);lines.column(col,width=width)
+        lines.pack(fill='both',expand=True,padx=12,pady=8)
+        chosen=[];out={'items':None}
         def refresh(*_):
-            term=search.get().casefold().strip()
-            tree.delete(*tree.get_children())
-            for r in products:
-                if term in (r['name']+' '+r['sku']).casefold():
-                    tree.insert('','end',iid=str(r['id']),values=(r['sku'],r['name'],money(r['price']),r['qty']))
-        def add(*_):
-            ids=tree.selection()
-            if not ids:return
-            try:
-                quantity=int(qty.get())
-                if quantity<1:raise ValueError()
-            except ValueError:
-                messagebox.showerror('Quantity','Enter a positive whole number.',parent=dialog);return
-            product=next(r for r in products if r['id']==int(ids[0]))
-            existing=sum(item[2] for item in selected if item[0]==product['id'])
-            if kind=='Invoice' and existing+quantity>product['qty']:
-                messagebox.showerror('Stock',f"Only {product['qty']} available for {product['name']}.",parent=dialog);return
-            selected.append((product['id'],product['name'],quantity,product['price'],quantity*product['price']))
-            lines.insert('','end',values=(product['sku'],product['name'],quantity,money(quantity*product['price'])))
+            term=search.get().strip().casefold();catalog.delete(*catalog.get_children())
+            for item in products:
+                if term in (item['sku']+' '+item['name']).casefold():
+                    catalog.insert('','end',iid=str(item['id']),values=(item['sku'],item['name'],money(item['price']),money(item['special_price']) if item['special_price'] is not None else 'Catalog',item['qty']))
+        def product_selected(_=None):
+            if catalog.selection():
+                item=next(x for x in products if x['id']==int(catalog.selection()[0]))
+                amount=item['special_price'] if item['special_price'] is not None else item['price']
+                unit.set(f'{amount/100:.2f}')
+        def row_selected(_=None):
+            if lines.selection():
+                item=chosen[lines.index(lines.selection()[0])]
+                qty.set(str(item[2]));unit.set(f'{item[3]/100:.2f}')
+        def numbers():
+            count=int(qty.get());value=cents(unit.get())
+            if count<=0:raise ValueError('Quantity must be positive.')
+            return count,value
+        def available(pid,quantity,exclude=None):
+            if kind!='Invoice':return True
+            item=next(x for x in products if x['id']==pid)
+            reserved=sum(x[2] for i,x in enumerate(chosen) if x[0]==pid and i!=exclude)
+            return reserved+quantity<=item['qty']
+        def add():
+            if not catalog.selection():return
+            try: count,price=numbers()
+            except ValueError as exc:messagebox.showerror('Invalid quantity or price',str(exc),parent=win);return
+            item=next(x for x in products if x['id']==int(catalog.selection()[0]))
+            if not available(item['id'],count):
+                messagebox.showerror('Stock','Not enough stock.',parent=win);return
+            chosen.append((item['id'],item['name'],count,price,count*price))
+            lines.insert('','end',values=(item['sku'],item['name'],count,money(price),money(count*price)))
+        def change():
+            if not lines.selection():return
+            index=lines.index(lines.selection()[0]);previous=chosen[index]
+            try: count,price=numbers()
+            except ValueError as exc:messagebox.showerror('Invalid line',str(exc),parent=win);return
+            if not available(previous[0],count,exclude=index):
+                messagebox.showerror('Stock','Not enough stock.',parent=win);return
+            chosen[index]=(previous[0],previous[1],count,price,count*price)
+            prod=next(x for x in products if x['id']==previous[0])
+            lines.item(lines.selection()[0],values=(prod['sku'],previous[1],count,money(price),money(count*price)))
         def remove():
-            for iid in lines.selection():
-                index=lines.index(iid)
-                selected.pop(index);lines.delete(iid)
-        result={'items':None}
-        def finish():
-            if not selected:
-                messagebox.showwarning('Products','Add at least one product.',parent=dialog);return
-            result['items']=list(selected);dialog.destroy()
-        def cancel():dialog.destroy()
-        tree.bind('<Double-1>',add)
-        search.trace_add('write',refresh)
-        refresh()
-        ttk.Button(controls,text='Add selected product',command=add).pack(side='left',padx=5)
+            for index in sorted((lines.index(x) for x in lines.selection()),reverse=True):
+                chosen.pop(index);lines.delete(lines.get_children()[index])
+        def done():
+            if not chosen:messagebox.showwarning('Products','Select at least one product.',parent=win);return
+            out['items']=list(chosen);win.destroy()
+        search.trace_add('write',refresh);refresh()
+        catalog.bind('<<TreeviewSelect>>',product_selected)
+        catalog.bind('<Double-1>',lambda _:add())
+        lines.bind('<<TreeviewSelect>>',row_selected)
+        ttk.Button(controls,text='Add product',command=add).pack(side='left',padx=5)
+        ttk.Button(controls,text='Update selected line',command=change).pack(side='left',padx=5)
         ttk.Button(controls,text='Remove line',command=remove).pack(side='left',padx=5)
-        ttk.Button(controls,text='Done',command=finish).pack(side='right',padx=5)
-        ttk.Button(controls,text='Cancel',command=cancel).pack(side='right')
-        dialog.protocol('WM_DELETE_WINDOW',cancel)
-        dialog.wait_window()
-        return result['items']
+        actions=ttk.Frame(win,padding=10);actions.pack(fill='x')
+        ttk.Button(actions,text='Cancel',command=win.destroy).pack(side='right',padx=5)
+        ttk.Button(actions,text='Save line items',command=done).pack(side='right',padx=5)
+        win.wait_window();return out['items']
 
     def dashboard(self,p):
         super().dashboard(p)
@@ -301,9 +323,119 @@ class BusinessDesk(BaseApp):
         ttk.Label(p,text=f'Open/created estimates: {estimates[0]}  |  Estimate value: {money(estimates[1])} (not invoiced revenue)',
                   font=('Segoe UI',11)).pack(anchor='w',pady=10)
     def customers(self,p):
-        super().customers(p)
-        actions=ttk.Frame(p);actions.pack(fill='x')
-        self.button(actions,'Import customers from Excel',lambda:self.import_excel_dialog('customers'))
+        bar=ttk.Frame(p);bar.pack(fill='x')
+        tree=self.table(p,('ID','Name','Email','Phone','Address','Tax-exempt','Notes'))
+        def refresh():
+            tree.delete(*tree.get_children())
+            for r in self.db.execute('SELECT * FROM customers ORDER BY name'):
+                tree.insert('','end',values=(r['id'],r['name'],r['email'] or '',r['phone'] or '',
+                    r['address'] or '','Yes' if r['tax_exempt'] else 'No',r['notes'] or ''))
+        def edit(new=False):
+            cid=None if new else self.selected(tree)
+            record={} if new else dict(self.db.execute('SELECT * FROM customers WHERE id=?',(cid,)).fetchone())
+            win=tk.Toplevel(self.root);win.title('Customer');win.transient(self.root);win.grab_set()
+            fields={}
+            for index,key in enumerate(('name','email','phone','address','notes')):
+                ttk.Label(win,text=key.title()).grid(row=index,column=0,padx=12,pady=7,sticky='w')
+                variable=tk.StringVar(value=str(record.get(key) or ''))
+                ttk.Entry(win,textvariable=variable,width=43).grid(row=index,column=1,padx=12,pady=7)
+                fields[key]=variable
+            tax_exempt=tk.BooleanVar(value=bool(record.get('tax_exempt',0)))
+            ttk.Checkbutton(win,text='Tax-exempt customer',variable=tax_exempt).grid(row=5,column=0,columnspan=2,pady=5)
+            ttk.Label(win,text='Verify a valid exemption certificate and applicable tax rules.').grid(row=6,column=0,columnspan=2,pady=5)
+            def save():
+                vals=[fields[k].get().strip() for k in ('name','email','phone','address','notes')]
+                if not vals[0]:
+                    messagebox.showerror('Customer','Name is required.',parent=win);return
+                with self.db:
+                    if new:self.db.execute('INSERT INTO customers(name,email,phone,address,notes,tax_exempt) VALUES(?,?,?,?,?,?)',(*vals,int(tax_exempt.get())))
+                    else:self.db.execute('UPDATE customers SET name=?,email=?,phone=?,address=?,notes=?,tax_exempt=? WHERE id=?',(*vals,int(tax_exempt.get()),cid))
+                win.destroy();refresh()
+            ttk.Button(win,text='Save',command=save).grid(row=7,column=1,pady=12,sticky='e')
+            ttk.Button(win,text='Cancel',command=win.destroy).grid(row=7,column=0,pady=12)
+            win.wait_window()
+        self.button(bar,'Add customer',lambda:edit(True))
+        self.button(bar,'Edit selected',edit)
+        self.button(bar,'Customer product prices',lambda:self.customer_price_manager(self.selected(tree)))
+        self.button(bar,'Import customers from Excel',lambda:self.import_excel_dialog('customers'))
+        refresh()
+
+    def customer_price_manager(self,customer_id):
+        customer=self.db.execute('SELECT name FROM customers WHERE id=?',(customer_id,)).fetchone()
+        if not customer:raise ValueError('Customer not found.')
+        products=list(self.db.execute('SELECT id,sku,name,price FROM products ORDER BY name'))
+        if not products:raise ValueError('Add products to the catalog first.')
+        win=tk.Toplevel(self.root);win.title('Special prices — '+customer['name'])
+        win.transient(self.root);win.grab_set();win.geometry('750x500')
+        ttk.Label(win,text='Customer-specific prices for '+customer['name'],font=('Segoe UI',13,'bold')).pack(padx=12,pady=10,anchor='w')
+        ttk.Label(win,text='These apply to new estimates/invoices; existing documents are unchanged.').pack(padx=12,anchor='w')
+        table=ttk.Treeview(win,columns=('SKU','Product','Catalog','Special'),show='headings')
+        for col,width in [('SKU',110),('Product',310),('Catalog',110),('Special',110)]:
+            table.heading(col,text=col);table.column(col,width=width)
+        table.pack(fill='both',expand=True,padx=12,pady=12)
+        def refresh():
+            table.delete(*table.get_children())
+            special={r['product_id']:r['price'] for r in self.db.execute('SELECT product_id,price FROM customer_prices WHERE customer_id=?',(customer_id,))}
+            for prod in products:
+                table.insert('','end',iid=str(prod['id']),values=(prod['sku'],prod['name'],money(prod['price']),money(special[prod['id']]) if prod['id'] in special else 'Catalog'))
+        price=tk.StringVar();bottom=ttk.Frame(win,padding=10);bottom.pack(fill='x')
+        ttk.Label(bottom,text='Price ($)').pack(side='left')
+        ttk.Entry(bottom,textvariable=price,width=12).pack(side='left',padx=8)
+        def selected_product():
+            selection=table.selection()
+            if not selection:raise ValueError('Select a product first.')
+            return int(selection[0])
+        def save():
+            pid=selected_product();value=cents(price.get())
+            with self.db:self.db.execute('INSERT INTO customer_prices(customer_id,product_id,price) VALUES(?,?,?) ON CONFLICT(customer_id,product_id) DO UPDATE SET price=excluded.price',(customer_id,pid,value))
+            refresh()
+        def reset():
+            pid=selected_product()
+            with self.db:self.db.execute('DELETE FROM customer_prices WHERE customer_id=? AND product_id=?',(customer_id,pid))
+            price.set('');refresh()
+        def choose(_):
+            if table.selection():
+                result=self.db.execute('SELECT price FROM customer_prices WHERE customer_id=? AND product_id=?',(customer_id,int(table.selection()[0]))).fetchone()
+                price.set(f'{result[0]/100:.2f}' if result else '')
+        table.bind('<<TreeviewSelect>>',choose)
+        ttk.Button(bottom,text='Save price',command=lambda:self._safe(save)).pack(side='left',padx=6)
+        ttk.Button(bottom,text='Use catalog price',command=lambda:self._safe(reset)).pack(side='left',padx=6)
+        ttk.Button(bottom,text='Close',command=win.destroy).pack(side='right')
+        refresh();win.wait_window()
+
+    def _safe(self,fn):
+        try:fn()
+        except Exception as exc:self.error(exc)
+
+    def document_header_dialog(self,customers):
+        win=tk.Toplevel(self.root);win.title('New estimate or invoice');win.transient(self.root);win.grab_set()
+        win.resizable(False,False)
+        labels=[f"{c['name']} (ID {c['id']})" for c in customers]
+        chosen=tk.StringVar(value=labels[0]);kind=tk.StringVar(value='Estimate')
+        rate=tk.StringVar(value=self.setting('default_tax_rate') or '0');notes=tk.StringVar()
+        for index,label in enumerate(('Customer','Type','Tax rate (%)','Notes')):
+            ttk.Label(win,text=label).grid(row=index,column=0,padx=12,pady=8,sticky='w')
+        ttk.Combobox(win,values=labels,textvariable=chosen,state='readonly',width=42).grid(row=0,column=1,pady=8)
+        ttk.Combobox(win,values=['Estimate','Invoice'],textvariable=kind,state='readonly').grid(row=1,column=1,sticky='w')
+        rate_entry=ttk.Entry(win,textvariable=rate,width=14);rate_entry.grid(row=2,column=1,sticky='w')
+        ttk.Entry(win,textvariable=notes,width=44).grid(row=3,column=1,pady=8)
+        status=ttk.Label(win,text='');status.grid(row=4,column=0,columnspan=2,pady=5)
+        def is_exempt():
+            cid=customers[labels.index(chosen.get())]['id']
+            return bool(self.db.execute('SELECT tax_exempt FROM customers WHERE id=?',(cid,)).fetchone()[0])
+        def refresh(*_):
+            exempt=is_exempt()
+            rate_entry.configure(state='disabled' if exempt else 'normal')
+            status.configure(text='Tax-exempt: sales tax will be $0.00' if exempt else 'Taxable customer')
+        chosen.trace_add('write',refresh);refresh()
+        result={'value':None}
+        def done():
+            cid=customers[labels.index(chosen.get())]['id']
+            result['value']={'customer':str(cid),'kind':kind.get(),'tax':'0' if is_exempt() else rate.get(),'notes':notes.get()}
+            win.destroy()
+        ttk.Button(win,text='Continue to products',command=done).grid(row=5,column=1,sticky='e',padx=12,pady=12)
+        ttk.Button(win,text='Cancel',command=win.destroy).grid(row=5,column=0,sticky='w',padx=12)
+        win.wait_window();return result['value']
 
     def import_excel_dialog(self,kind):
         from excel_import import read_excel,import_rows

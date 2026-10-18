@@ -218,8 +218,11 @@ class App:
         def create():
             customers=list(self.db.execute("SELECT id,name FROM customers ORDER BY name"))
             if not customers:raise ValueError("Add a customer first.")
-            v=self.form("New document",[("kind","Type: Estimate or Invoice"),("customer","Customer ID: "+", ".join(f'{x["id"]}={x["name"]}' for x in customers[:12])),
-                    ("tax","Tax rate (%), e.g. 5.5"),("notes","Notes")],{"kind":"Estimate","tax":"0"})
+            if hasattr(self,'document_header_dialog'):
+                v=self.document_header_dialog(customers)
+            else:
+                v=self.form("New document",[("kind","Type: Estimate or Invoice"),("customer","Customer ID: "+", ".join(f'{x["id"]}={x["name"]}' for x in customers[:12])),
+                        ("tax","Tax rate (%), e.g. 5.5"),("notes","Notes")],{"kind":"Estimate","tax":"0"})
             if not v:return
             kind=v["kind"].title()
             if kind not in ("Estimate","Invoice"):raise ValueError("Type must be Estimate or Invoice.")
@@ -228,7 +231,7 @@ class App:
             rate=Decimal(v["tax"] or "0")
             if not rate.is_finite() or not 0<=rate<=100:raise ValueError("Tax must be between 0 and 100%.")
             if hasattr(self,'select_document_products'):
-                items=self.select_document_products(kind)
+                items=self.select_document_products(kind,cid)
             else:
                 items=[]
                 while True:
@@ -245,6 +248,9 @@ class App:
             if not items:return
             subtotal=sum(i[4] for i in items)
             tax=int((Decimal(subtotal)*rate/100).quantize(Decimal("1"),rounding=ROUND_HALF_UP))
+            if 'tax_exempt' in {r[1] for r in self.db.execute('PRAGMA table_info(customers)')}:
+                if self.db.execute('SELECT tax_exempt FROM customers WHERE id=?',(cid,)).fetchone()[0]:
+                    tax=0
             total=subtotal+tax
             if not messagebox.askyesno("Confirm",f"Create {kind} for {money(total)} with {len(items)} line item(s)?"):return
             with self.db:

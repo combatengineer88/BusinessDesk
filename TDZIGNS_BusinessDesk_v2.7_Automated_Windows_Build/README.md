@@ -192,3 +192,20 @@ After GitHub Actions finishes, check the repo **Releases** page for the three as
 **Bootstrap:** Older compiled BusinessDesk versions do not yet have the built-in GitHub Releases URL. Install 2.8.0 once using the older local update feature (download the compiled 2.8.0 ZIP from GitHub Releases). All later versions can be installed by clicking **Check GitHub for updates**.
 
 The source ZIP created by ChatGPT is not itself a compiled update and does not install through the app. No Windows build or release has been executed from this environment.
+
+
+## v2.9.0 — Customer-specific prices and sales-tax exemption
+
+**Customers tab:** Add or edit customers and tick **Tax-exempt customer** (unchecked by default). Existing customers automatically migrate with tax_exempt=0. Before marking a customer exempt, confirm you have the required exemption documentation; tax treatment varies by jurisdiction and transaction.
+
+**Customers tab → Customer product prices:** Select a customer, click **Customer product prices**, select a catalog product, enter the negotiated unit price, and click **Save price**. You can reset to **Use catalog price**. These overrides apply to new documents and do not change the global catalog price or previously created estimates/invoices.
+
+**Estimates / Invoices → New document:** Select the customer by name (no numeric customer ID necessary). The product picker searches SKU/name and shows both catalog and customer prices. Enter a quantity, edit the unit price for this one estimate/invoice if needed, and click **Add product**. Select an added line to modify its quantity/price using **Update selected line**. The price on each saved document remains frozen even if negotiated pricing later changes.
+
+**Taxes:** For tax-exempt customers, document sales tax is automatically forced to zero. For taxable customers, the entered percentage remains applicable. BusinessDesk does not validate exemption certificates, supply product-specific tax codes, or calculate jurisdiction-dependent tax rules; review actual sales tax obligations before sending invoices.
+
+**Backwards-compatible SQLite migration:** Adds `customers.tax_exempt` (default 0) and `customer_prices` with foreign keys. Does not delete existing customer, invoice, or catalog data. Back up `%LOCALAPPDATA%\BusinessDesk\business.db` before deploying.
+
+**GitHub automated Windows release:** Replace the existing application source files under `TDZIGNS_BusinessDesk_v2.7_Automated_Windows_Build/` and the repository-root `.github/workflows/windows-release.yml`. Commit to `main`, then create and push tag `v2.9.0` (tag must reference updated source commit). GitHub Actions will build a compiled installer ZIP and publish a release containing `update_manifest.json` so v2.8+ clients can check GitHub for updates. This source package itself is not a compiled Windows update. Check Actions and test on Windows before production deployment.
+
+**Tested:** `python test_customer_pricing.py` (4 database regression tests passing); Python compilation. GUI and Windows installer have not been exercised here.

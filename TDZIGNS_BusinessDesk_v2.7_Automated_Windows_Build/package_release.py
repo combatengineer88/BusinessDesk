@@ -4,7 +4,7 @@ import json
 import zipfile
 from pathlib import Path
 
-VERSION = "2.8.0"
+VERSION = "2.9.0"
 REPOSITORY = "combatengineer88/BusinessDesk"
 TAG = f"v{VERSION}"
 EXE = Path("dist/TDZIGNS_BusinessDesk.exe")
