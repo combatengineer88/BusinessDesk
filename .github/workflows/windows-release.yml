@@ -43,10 +43,16 @@ jobs:
               throw "PowerShell syntax failure in $scriptName"
             }
           }
+      - name: Test supplier assignments and purchase orders
+        shell: pwsh
+        run: |
+          python test_supplier_products.py
+          python test_customer_pricing.py
+          python test_invoice_fix.py
       - name: Build Windows EXE
         shell: pwsh
         run: |
-          python -m PyInstaller --noconfirm --clean --onefile --windowed --name TDZIGNS_BusinessDesk --collect-all reportlab --collect-all PIL --collect-all openpyxl --hidden-import excel_import --add-data "update_installer.ps1;." launcher.py
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name TDZIGNS_BusinessDesk --collect-all reportlab --collect-all PIL --collect-all openpyxl --hidden-import excel_import --hidden-import supplier_catalog --add-data "update_installer.ps1;." launcher.py
       - name: Smoke-test compiled Windows EXE
         shell: pwsh
         run: |
@@ -58,6 +64,24 @@ jobs:
       - name: Package release
         shell: pwsh
         run: python package_release.py
+      - name: Verify updater can prepare published ZIP before app shutdown
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path 'businessdesk.py' -Pattern "^VERSION = '([0-9.]+)'").Matches.Groups[1].Value
+          $zip = (Resolve-Path "TDZIGNS_BusinessDesk_$version.zip").Path
+          $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+          $data = Join-Path $env:RUNNER_TEMP 'BusinessDeskUpdatePreflight'
+          $updates = Join-Path $data 'updates'
+          New-Item -ItemType Directory -Path $updates -Force | Out-Null
+          $handoff = Join-Path $updates ('handoff_' + [guid]::NewGuid().ToString('N') + '.ready')
+          $target = Join-Path $data 'TDZIGNS_BusinessDesk.exe'
+          # Run the Windows PowerShell installer in its own process because the
+          # installer explicitly exits with a numeric status code.
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\update_installer.ps1 -Package $zip -Target $target -ProcessIdToWait 0 -DataDir $data -ExpectedSha256 $hash -Version $version -AllowFreshInstall -HandoffFile $handoff -PrepareOnly
+          if ($LASTEXITCODE -ne 0) { throw "Installer preflight failed (exit code $LASTEXITCODE)." }
+          if (-not (Test-Path -LiteralPath $handoff)) { throw 'Installer did not acknowledge update handoff.' }
+          if ((Get-Content -LiteralPath $handoff -Raw).Trim() -ne 'PREPARED') { throw 'Incorrect installer handoff.' }
+          Write-Host "Updater verified and prepared BusinessDesk v$version"
       - name: Upload installable build
         uses: actions/upload-artifact@v4
         with:
