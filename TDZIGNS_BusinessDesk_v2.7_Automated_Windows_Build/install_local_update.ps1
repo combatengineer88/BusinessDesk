@@ -43,7 +43,8 @@ try {
     if(Test-Path $src){Copy-Item -LiteralPath $src -Destination $backup -Force}
   }
   & (Join-Path $PSScriptRoot 'update_installer.ps1') -Package $package -Target $target -ProcessIdToWait 0 -DataDir $dataDir -ExpectedSha256 $hash
-  [System.Windows.Forms.MessageBox]::Show("Update $version installation requested. Check the app version after it opens.",'TDZIGNS BusinessDesk') | Out-Null
+  if ($LASTEXITCODE -ne 0) {throw 'Update did not finish. See installation.log under %LOCALAPPDATA%\BusinessDesk\updates.'}
+  [System.Windows.Forms.MessageBox]::Show("Update installed at: $target. BusinessDesk was restarted.",'TDZIGNS BusinessDesk') | Out-Null
 } catch {
   [System.Windows.Forms.MessageBox]::Show($_.Exception.Message,'Update failed') | Out-Null
   exit 1

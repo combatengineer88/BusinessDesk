@@ -194,18 +194,33 @@ After GitHub Actions finishes, check the repo **Releases** page for the three as
 The source ZIP created by ChatGPT is not itself a compiled update and does not install through the app. No Windows build or release has been executed from this environment.
 
 
-## v2.9.0 — Customer-specific prices and sales-tax exemption
+## v2.9.1 — Repair silent updater shutdown / restart failures
 
-**Customers tab:** Add or edit customers and tick **Tax-exempt customer** (unchecked by default). Existing customers automatically migrate with tax_exempt=0. Before marking a customer exempt, confirm you have the required exemption documentation; tax treatment varies by jurisdiction and transaction.
+The Windows updater previously continued in a hidden PowerShell process. If replacing the EXE or starting the new app failed, there was no visible status, and the user had to guess where the new EXE went.
 
-**Customers tab → Customer product prices:** Select a customer, click **Customer product prices**, select a catalog product, enter the negotiated unit price, and click **Save price**. You can reset to **Use catalog price**. These overrides apply to new documents and do not change the global catalog price or previously created estimates/invoices.
+**New behavior:**
 
-**Estimates / Invoices → New document:** Select the customer by name (no numeric customer ID necessary). The product picker searches SKU/name and shows both catalog and customer prices. Enter a quantity, edit the unit price for this one estimate/invoice if needed, and click **Add product**. Select an added line to modify its quantity/price using **Update selected line**. The price on each saved document remains frozen even if negotiated pricing later changes.
+- Upgrades **in place**, at exactly the `TDZIGNS_BusinessDesk.exe` path the currently running BusinessDesk uses. Business data remains under `%LOCALAPPDATA%\BusinessDesk\business.db`.
+- **Updates / Branding** now displays the actual application path, previous update status, **Open application folder**, and **Open update log**.
+- After confirming installation, BusinessDesk stores the intended executable location in `%LOCALAPPDATA%\BusinessDesk\updates\install_status.json` *before* it exits.
+- The external updater checks the SHA-256 of the downloaded package, waits for the old process to exit, backs up the old EXE, and retries copying a busy EXE. The database is backed up using SQLite's online backup API in the main application.
+- The updater launches the new EXE and waits for a positive startup-ready acknowledgement from BusinessDesk. If startup fails, it attempts to restore and reopen the previous EXE and displays the failure details (no longer silently exits).
+- Detailed history: `%LOCALAPPDATA%\BusinessDesk\updates\installation.log`. Fatal Python startup errors: `%LOCALAPPDATA%\BusinessDesk\updates\startup_errors.log`.
+- The Windows GitHub Actions workflow compiles `launcher.py` so failures on startup are logged and presented rather than disappearing. It also checks PowerShell syntax and smoke-tests the frozen executable before release.
 
-**Taxes:** For tax-exempt customers, document sales tax is automatically forced to zero. For taxable customers, the entered percentage remains applicable. BusinessDesk does not validate exemption certificates, supply product-specific tax codes, or calculate jurisdiction-dependent tax rules; review actual sales tax obligations before sending invoices.
+**One-time recovery if your currently installed updater is broken:** After publishing release **v2.9.1** (tagging your GitHub repository), extract this source ZIP and double-click `repair_from_github.bat`. It downloads the latest compiled BusinessDesk release, locates or asks for your existing installed EXE, and installs/restarts it independently of the old updater. If your old EXE was lost, the wizard can instead install into `%LOCALAPPDATA%\Programs\TDZIGNS BusinessDesk\TDZIGNS_BusinessDesk.exe` and create a desktop shortcut.
 
-**Backwards-compatible SQLite migration:** Adds `customers.tax_exempt` (default 0) and `customer_prices` with foreign keys. Does not delete existing customer, invoice, or catalog data. Back up `%LOCALAPPDATA%\BusinessDesk\business.db` before deploying.
+Open `show_update_log.bat` at any time to inspect the current update logs. Do NOT overwrite or delete `business.db`. Before testing with production records, copy your database backup to a separate safe location.
 
-**GitHub automated Windows release:** Replace the existing application source files under `TDZIGNS_BusinessDesk_v2.7_Automated_Windows_Build/` and the repository-root `.github/workflows/windows-release.yml`. Commit to `main`, then create and push tag `v2.9.0` (tag must reference updated source commit). GitHub Actions will build a compiled installer ZIP and publish a release containing `update_manifest.json` so v2.8+ clients can check GitHub for updates. This source package itself is not a compiled Windows update. Check Actions and test on Windows before production deployment.
+**GitHub layout:** In your repository, keep the source files inside `TDZIGNS_BusinessDesk_v2.7_Automated_Windows_Build/`, and put `.github/workflows/windows-release.yml` at the repository root. Upload the updated files, then push `v2.9.1` to initiate the Windows EXE and installable release ZIP build. The GitHub Release does not exist until the workflow successfully publishes it; uploading this source ZIP alone will not install or repair the executable.
 
-**Tested:** `python test_customer_pricing.py` (4 database regression tests passing); Python compilation. GUI and Windows installer have not been exercised here.
+**Testing:** The Python code can be syntax-tested and smoke-tested locally. Windows PowerShell, the exe replacement, and the relaunch handshake require validation on a Windows machine. The GitHub Actions build will test syntax and packaged startup, not the live replacement of a user's running executable.
+
+
+## v2.9.2 — Purchase Order Supplier Dropdown
+
+When creating a purchase order, **Suppliers / Purchase Orders → New PO** opens a supplier-selection window with a read-only dropdown of all existing suppliers (ordered by name). Each option displays the supplier name and its ID to distinguish duplicate names; **you never need to type an ID**. Choose a supplier and optionally enter notes, then click **Continue** to add PO line items. Clicking Cancel leaves the database unchanged.
+
+The PO still stores the original numeric `supplier_id` internally, so existing purchase orders, database records, PDFs, receiving, and accounting logic remain unchanged. Adding or importing suppliers populates the dropdown the next time a New PO dialog is opened.
+
+**GitHub updates:** Replace project source in `TDZIGNS_BusinessDesk_v2.7_Automated_Windows_Build/`, retain workflow at repository root `.github/workflows/windows-release.yml`, commit to `main`, and push tag `v2.9.2` to have GitHub Actions publish the compiled ZIP. Test on a copy of your business data before production rollout.

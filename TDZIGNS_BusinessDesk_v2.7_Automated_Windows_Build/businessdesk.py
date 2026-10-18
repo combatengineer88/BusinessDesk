@@ -1,7 +1,7 @@
 """TDZIGNS LLC BusinessDesk 2.0 — Windows/offline desktop business manager.
 The local application uses the v1 core and extends it with v2 business workflows.
 """
-import csv, hashlib, json, os, shutil, sqlite3, sys, tempfile, threading, urllib.request, webbrowser, subprocess, zipfile, re
+import csv, hashlib, json, os, shutil, sqlite3, sys, tempfile, threading, urllib.request, webbrowser, subprocess, zipfile, re, uuid
 from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
@@ -10,8 +10,9 @@ from tkinter import ttk, messagebox, filedialog, simpledialog
 
 from core_v1 import App as BaseApp, DB, DATA, cents, money
 from sales_workflow import convert_estimate, record_invoice_payment
+from update_support import read_status, signal_ready, STATUS_NAME
 
-VERSION = '2.9.0'
+VERSION = '2.9.2'
 BUSINESS = 'TDZIGNS LLC'
 RELEASE_MANIFEST_URL = 'https://github.com/combatengineer88/BusinessDesk/releases/latest/download/update_manifest.json'
 TRUSTED_RELEASE_PREFIX = 'https://github.com/combatengineer88/BusinessDesk/releases/download/'
@@ -173,6 +174,8 @@ class BusinessDesk(BaseApp):
     def __init__(self):
         super().__init__()
         self.root.title(f'{BUSINESS} | BusinessDesk {VERSION}')
+        # Health acknowledgement to the external updater once the login window is visible.
+        self.root.after(400, lambda:signal_ready(DATA, VERSION, Path(sys.executable).resolve()))
     def login(self):
         schema(self.db)
         self._update_checked=False
@@ -565,6 +568,59 @@ class BusinessDesk(BaseApp):
         self.button(bar,'Convert estimate to invoice',convert_selected)
         self.button(bar,'Record invoice payment',pay_selected)
         self.button(bar,'Export selected branded PDF',export_pdf)
+    def select_po_supplier(self):
+        """Pick a saved supplier by name; keep the numeric ID internal."""
+        suppliers=list(self.db.execute('SELECT id,name FROM suppliers ORDER BY name COLLATE NOCASE,id'))
+        if not suppliers:
+            raise ValueError('No suppliers found. Add or import a supplier before creating a purchase order.')
+
+        window=tk.Toplevel(self.root)
+        window.title('New Purchase Order — Select Supplier')
+        window.transient(self.root)
+        window.resizable(False, False)
+        window.grab_set()
+        frame=ttk.Frame(window,padding=18)
+        frame.pack(fill='both',expand=True)
+
+        ttk.Label(frame,text='Supplier').grid(row=0,column=0,sticky='w',padx=(0,12),pady=8)
+        # Display IDs only to distinguish suppliers that happen to share a name.
+        labels=[f'{supplier["name"]} (#{supplier["id"]})' for supplier in suppliers]
+        selection=ttk.Combobox(frame,values=labels,state='readonly',width=52)
+        selection.grid(row=0,column=1,sticky='ew',pady=8)
+        selection.set('')  # No accidental supplier selection.
+        selection.focus_set()
+
+        ttk.Label(frame,text='Notes').grid(row=1,column=0,sticky='nw',padx=(0,12),pady=8)
+        notes=tk.Text(frame,width=52,height=5,wrap='word')
+        notes.grid(row=1,column=1,sticky='ew',pady=8)
+        result={'value':None}
+
+        def confirm(event=None):
+            index=selection.current()
+            if index<0:
+                messagebox.showwarning('Select a supplier',
+                    'Choose a supplier from the dropdown before continuing.',parent=window)
+                selection.focus_set()
+                return
+            supplier_id=suppliers[index]['id']
+            # Re-check the record in case it was removed while this dialog was open.
+            if not self.db.execute('SELECT 1 FROM suppliers WHERE id=?',(supplier_id,)).fetchone():
+                messagebox.showerror('Supplier unavailable',
+                    'This supplier no longer exists. Reopen the purchase order form.',parent=window)
+                return
+            result['value']={'supplier_id':supplier_id,'notes':notes.get('1.0','end-1c').strip()}
+            window.destroy()
+
+        buttons=ttk.Frame(frame)
+        buttons.grid(row=2,column=1,sticky='e',pady=(12,0))
+        ttk.Button(buttons,text='Cancel',command=window.destroy).pack(side='right',padx=(8,0))
+        ttk.Button(buttons,text='Continue',command=confirm).pack(side='right')
+        selection.bind('<Return>',confirm)
+        window.bind('<Escape>',lambda event:window.destroy())
+        window.protocol('WM_DELETE_WINDOW',window.destroy)
+        window.wait_window()
+        return result['value']
+
     def purchase_orders(self,p):
         bar=ttk.Frame(p);bar.pack(fill='x')
         tree=self.table(p,('ID','Supplier','Ordered','Status','Total'))
@@ -580,12 +636,9 @@ class BusinessDesk(BaseApp):
             with self.db:self.db.execute('INSERT INTO suppliers(name,email,phone,address) VALUES(?,?,?,?)',tuple(v.values()))
             messagebox.showinfo('Supplier added','Supplier saved.')
         def create():
-            suppliers=list(self.db.execute('SELECT id,name FROM suppliers ORDER BY name'))
-            if not suppliers:raise ValueError('Add a supplier first.')
-            v=self.form('New purchase order',[('supplier','Supplier ID: '+', '.join(f'{x["id"]}={x["name"]}' for x in suppliers[:12])),('notes','Notes')])
+            v=self.select_po_supplier()
             if not v:return
-            sid=int(v['supplier'])
-            if sid not in [x['id'] for x in suppliers]:raise ValueError('Unknown supplier ID.')
+            sid=v['supplier_id']
             items=[]
             while True:
                 pid=simpledialog.askinteger('PO line','Product ID (Cancel to finish)',parent=self.root,minvalue=1)
@@ -771,11 +824,33 @@ class BusinessDesk(BaseApp):
             with self.db:self.db.execute('UPDATE update_settings SET manifest_url=?,check_at_launch=? WHERE id=1',(url.get().strip(),int(auto.get())))
             messagebox.showinfo('Saved','Update preferences saved.')
         self.button(p,'Save update settings',save)
+        installed=Path(sys.executable).resolve() if getattr(sys,'frozen',False) else Path(__file__).resolve()
+        ttk.Label(p,text='Application location: '+str(installed),wraplength=900).pack(anchor='w',pady=5)
+        last=read_status(DATA)
+        if last:
+            state=last.get('status','unknown')
+            detail=last.get('message','')
+            ttk.Label(p,text=f'Last update: {state} — {detail}',wraplength=900).pack(anchor='w',pady=4)
+        self.button(p,'Open application folder',self.open_application_folder)
+        self.button(p,'Open update log',self.open_update_log)
         self.button(p,'Check GitHub for updates',lambda:self.check_updates(url.get().strip() or RELEASE_MANIFEST_URL))
         self.button(p,'Install local ZIP or EXE',self.choose_local_update)
         self.button(p,'Select update folder',self.choose_update_folder)
 
         ttk.Label(p,text='Click Check GitHub for updates to download and install the newest published release. An administrator must approve installation. The repository must publish a tagged GitHub Release with a compiled update ZIP and manifest. Local ZIP/EXE installation remains available.',wraplength=850).pack(anchor='w',pady=12)
+    def open_application_folder(self):
+        path=Path(sys.executable if getattr(sys,'frozen',False) else __file__).resolve().parent
+        if sys.platform=='win32':os.startfile(str(path))
+        else:messagebox.showinfo('Application folder',str(path))
+
+    def open_update_log(self):
+        folder=DATA/'updates';folder.mkdir(parents=True,exist_ok=True)
+        log=folder/'installation.log'
+        if sys.platform=='win32':
+            if log.is_file():os.startfile(str(log))
+            else:os.startfile(str(folder))
+        else:messagebox.showinfo('Update diagnostics',str(log))
+
     def choose_update_folder(self):
         folder=filedialog.askdirectory(title='Choose folder containing a Windows update ZIP or EXE')
         if not folder:return
@@ -880,10 +955,10 @@ class BusinessDesk(BaseApp):
             messagebox.showwarning('Administrator required','Sign in as an administrator to install updates.')
             return
         if messagebox.askyesno('Install update',
-            f'Install TDZIGNS BusinessDesk {version} now?\n\nThe app will back up its database, close, replace the EXE, and restart.\nSave any other work first.'):
-            self.install_update(package,digest)
+            f'Install TDZIGNS BusinessDesk {version} now?\n\nExisting installation location:\n{Path(sys.executable).resolve()}\n\nBusinessDesk will back up its database, close, replace the EXE, and restart. If it fails, an error will be displayed and logged.\nSave any other work first.'):
+            self.install_update(package,digest,version)
 
-    def install_update(self,package,digest):
+    def install_update(self,package,digest,version=''):
         if not (getattr(sys,'frozen',False) and sys.platform=='win32'):
             raise ValueError('Automatic installation is only supported from the packaged Windows EXE.')
         if self.user['role']!='admin':raise PermissionError('Administrator login required.')
@@ -906,13 +981,25 @@ class BusinessDesk(BaseApp):
         with sqlite3.connect(str(backup)) as target:self.db.backup(target)
         helper_src=Path(getattr(sys,'_MEIPASS',Path(__file__).parent))/'update_installer.ps1'
         if not helper_src.is_file():raise FileNotFoundError('Installer helper missing from build.')
-        helper=updates/'update_installer.ps1'
+        helper=updates/('update_installer_'+uuid.uuid4().hex+'.ps1')
         shutil.copy2(helper_src,helper)
-        args=['powershell.exe','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass',
+        # Save the location even if the helper is unable to run.
+        status={'status':'handoff','version':version,'target':str(executable),
+                'message':'Closing the application; the installer will continue in a separate process.',
+                'log':str(updates/'installation.log')}
+        (updates/STATUS_NAME).write_text(json.dumps(status,indent=2),encoding='utf-8')
+        args=['powershell.exe','-NoProfile','-NonInteractive','-STA','-ExecutionPolicy','Bypass',
               '-File',str(helper),'-Package',str(package),'-Target',str(executable),
-              '-ProcessIdToWait',str(os.getpid()),'-DataDir',str(DATA),'-ExpectedSha256',digest]
+              '-ProcessIdToWait',str(os.getpid()),'-DataDir',str(DATA),'-ExpectedSha256',digest,'-Version',str(version if re.fullmatch(r'\d+\.\d+\.\d+',str(version)) else '')]
         flags=getattr(subprocess,'CREATE_NO_WINDOW',0)|getattr(subprocess,'DETACHED_PROCESS',0)
-        subprocess.Popen(args,creationflags=flags,close_fds=True)
+        try:
+            subprocess.Popen(args,creationflags=flags,close_fds=True)
+        except OSError as exc:
+            (updates/STATUS_NAME).write_text(json.dumps({**status,'status':'failed','message':str(exc)},indent=2),encoding='utf-8')
+            raise RuntimeError('Could not launch the updater. BusinessDesk has not been closed: '+str(exc)) from exc
+        # Ensure the sqlite file is released before the updater waits for this PID.
+        self.db.commit()
+        self.db.close()
         self.root.destroy()
 
 if __name__=='__main__':BusinessDesk().run()
