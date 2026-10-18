@@ -224,3 +224,25 @@ When creating a purchase order, **Suppliers / Purchase Orders → New PO** opens
 The PO still stores the original numeric `supplier_id` internally, so existing purchase orders, database records, PDFs, receiving, and accounting logic remain unchanged. Adding or importing suppliers populates the dropdown the next time a New PO dialog is opened.
 
 **GitHub updates:** Replace project source in `TDZIGNS_BusinessDesk_v2.7_Automated_Windows_Build/`, retain workflow at repository root `.github/workflows/windows-release.yml`, commit to `main`, and push tag `v2.9.2` to have GitHub Actions publish the compiled ZIP. Test on a copy of your business data before production rollout.
+
+
+## v2.9.3 — Supplier assignment on products and supplier-filtered purchase orders
+
+**Add or edit a product:** Open **Products / Catalog → Add product** or select a product and click **Edit**. Choose a saved supplier under **Primary supplier**. You can leave it as **Unassigned**. The catalog now shows the supplier alongside each product and exports the supplier name in its CSV.
+
+**Import from Excel:** The existing **Import products from Excel** option accepts an optional **Supplier** column (also **Supplier Name**, **Vendor**, **Vendor Name**, or **Primary Supplier**). Supplier names must match a saved supplier in BusinessDesk, ignoring capitalization. Add/import suppliers first in **Suppliers / Purchase Orders**. If a supplier name is unknown or duplicated, the import is rejected before data is changed, with the Excel row number shown. If the supplier cell is empty on a new product, the product remains unassigned. A blank/missing supplier on an updated product leaves its existing assignment unchanged; edit that product in the catalog to clear the supplier. Choose *Update* rather than *Skip* when assigning suppliers to existing SKUs via Excel.
+
+Example Excel headers and rows:
+
+| SKU | Name | Price | Cost | Qty | Supplier |
+|-----|------|-------|------|-----|----------|
+| SHIRT-1 | Custom T-Shirt | 19.99 | 9.00 | 50 | Alpha Supply |
+| DECAL-2 | Vinyl Decal | 5.50 | 1.30 | 120 | Beta Wholesale |
+
+**New PO:** Open **Suppliers / Purchase Orders → New PO**, choose a saved supplier from the supplier dropdown, and click **Continue**. The next screen offers **only products assigned to that supplier** in a product dropdown. Select products, specify quantities and adjustable unit costs, and add multiple lines to the PO. Click **Create purchase order** to save. No product IDs need to be typed. The purchase-order cost defaults to each product's catalog cost, *not* its customer selling price. The PO does not increase stock until it is received.
+
+**Database migration:** Existing products are kept intact and initially have no assigned supplier; assign them manually or using an Excel import. The schema adds a nullable `products.supplier_id` foreign key referencing `suppliers`. Existing purchase orders and invoices remain intact; only one primary supplier can be assigned to each catalog product in this version. Back up your database before upgrading.
+
+**Update delivery:** Upload the source files inside the `TDZIGNS_BusinessDesk_v2.7_Automated_Windows_Build/` folder to the same folder in your GitHub repository and overwrite the older files. Keep the workflow at the repository root under `.github/workflows/windows-release.yml`. Commit changes, then push `v2.9.3`; GitHub Actions produces the compiled Windows ZIP in Releases. Users can install it from BusinessDesk's GitHub updater. Do **not** select this *source* ZIP in the updater.
+
+**Verification:** Database migration, product imports, supplier filtering, PO creation, and GUI supplier/product dropdown workflows were tested in Linux with a virtual display. Final Windows executable and update/install behavior must still be verified through GitHub Actions and on Windows.

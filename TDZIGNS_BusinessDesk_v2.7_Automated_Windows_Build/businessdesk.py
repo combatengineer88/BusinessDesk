@@ -10,9 +10,10 @@ from tkinter import ttk, messagebox, filedialog, simpledialog
 
 from core_v1 import App as BaseApp, DB, DATA, cents, money
 from sales_workflow import convert_estimate, record_invoice_payment
+from supplier_catalog import supplier_choices, products_for_supplier, create_supplier_po, validate_supplier_rows
 from update_support import read_status, signal_ready, STATUS_NAME
 
-VERSION = '2.9.2'
+VERSION = '2.9.3'
 BUSINESS = 'TDZIGNS LLC'
 RELEASE_MANIFEST_URL = 'https://github.com/combatengineer88/BusinessDesk/releases/latest/download/update_manifest.json'
 TRUSTED_RELEASE_PREFIX = 'https://github.com/combatengineer88/BusinessDesk/releases/download/'
@@ -54,6 +55,11 @@ def schema(db):
         product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
         price INTEGER NOT NULL CHECK(price>=0),
         PRIMARY KEY(customer_id,product_id))""")
+    # A product may optionally have one primary supplier. Existing products remain unassigned.
+    product_columns={r[1] for r in db.execute('PRAGMA table_info(products)')}
+    if 'supplier_id' not in product_columns:
+        db.execute('ALTER TABLE products ADD COLUMN supplier_id INTEGER REFERENCES suppliers(id) ON DELETE SET NULL')
+    db.execute('CREATE INDEX IF NOT EXISTS idx_products_supplier ON products(supplier_id)')
     db.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_product_barcode ON products(barcode) WHERE barcode IS NOT NULL AND barcode != \'\'')
     db.executescript("""
     CREATE TRIGGER IF NOT EXISTS trg_invoice_journal AFTER INSERT ON documents
@@ -457,12 +463,16 @@ class BusinessDesk(BaseApp):
                 f'{len(errors)} invalid row(s). No records were imported.\n\n{problem}')
             return
         if not rows:raise ValueError('No valid rows found.')
+        if kind=='products':
+            # Reject unknown/ambiguous suppliers before any changes or confirmation.
+            validate_supplier_rows(self.db,rows)
         choice=messagebox.askyesnocancel('Import '+kind,
             f'Worksheet: {sheet}\nValid records: {len(rows)}\n\n{preview}\n\n'
             'Duplicate handling:\nYES = update matching records\n'
             'NO = skip matching records\nCANCEL = do not import.\n\n'
             'Products match by SKU; customers and suppliers match by name. '
-            'Updating product quantities REPLACES current stock counts.')
+            'Updating product quantities REPLACES current stock counts. '
+            'The optional Supplier column must match a saved supplier name.')
         if choice is None:return
         mode='update' if choice else 'skip'
         created,updated,skipped=import_rows(self.db,kind,rows,mode)
@@ -473,30 +483,69 @@ class BusinessDesk(BaseApp):
     def products(self,p):
         bar=ttk.Frame(p);bar.pack(fill='x')
         search=tk.StringVar()
-        ttk.Label(bar,text='Search SKU / barcode:').pack(side='left',padx=3)
-        entry=ttk.Entry(bar,textvariable=search,width=28);entry.pack(side='left',padx=4)
-        tree=self.table(p,('ID','SKU','Barcode','Name','Description','Price','Cost','Stock','Image'))
-        def refresh(*args):
+        ttk.Label(bar,text='Search SKU / barcode / product:').pack(side='left',padx=3)
+        ttk.Entry(bar,textvariable=search,width=26).pack(side='left',padx=4)
+        tree=self.table(p,('ID','SKU','Barcode','Name','Supplier','Description','Price','Cost','Stock','Image'))
+        def refresh(*_):
             tree.delete(*tree.get_children())
             term='%'+search.get().strip()+'%'
-            for r in self.db.execute('SELECT * FROM products WHERE sku LIKE ? OR barcode LIKE ? OR name LIKE ? ORDER BY name',(term,term,term)):
-                tree.insert('','end',values=(r['id'],r['sku'],r['barcode'],r['name'],r['description'],money(r['price']),money(r['cost']),r['qty'],
-                                                    'Yes' if r['image_path'] else ''))
+            sql="""SELECT p.*,s.name AS supplier_name FROM products p
+                LEFT JOIN suppliers s ON s.id=p.supplier_id
+                WHERE p.sku LIKE ? OR p.barcode LIKE ? OR p.name LIKE ? OR s.name LIKE ?
+                ORDER BY p.name COLLATE NOCASE"""
+            for r in self.db.execute(sql,(term,term,term,term)):
+                tree.insert('','end',values=(r['id'],r['sku'],r['barcode'],r['name'],
+                     r['supplier_name'] or 'Unassigned',r['description'],money(r['price']),
+                     money(r['cost']),r['qty'],'Yes' if r['image_path'] else ''))
         search.trace_add('write',refresh)
         def edit(new=False):
-            id=None if new else self.selected(tree)
-            row={} if new else dict(self.db.execute('SELECT * FROM products WHERE id=?',(id,)).fetchone())
-            if row:row.update(price=f'{row["price"]/100:.2f}',cost=f'{row["cost"]/100:.2f}')
-            v=self.form('Product',[(x,x.replace('_',' ').title()) for x in ('sku','barcode','name','description','price','cost','qty')],row)
-            if not v:return
-            if not v['sku'] or not v['name']:raise ValueError('SKU and name are required.')
-            qty=int(v['qty'])
-            if qty<0:raise ValueError('Stock cannot be negative.')
-            values=(v['sku'],v['barcode'],v['name'],v['description'],cents(v['price']),cents(v['cost']),qty)
-            with self.db:
-                if new:self.db.execute('INSERT INTO products(sku,barcode,name,description,price,cost,qty) VALUES(?,?,?,?,?,?,?)',values)
-                else:self.db.execute('UPDATE products SET sku=?,barcode=?,name=?,description=?,price=?,cost=?,qty=? WHERE id=?',(*values,id))
-            refresh()
+            product_id=None if new else self.selected(tree)
+            record={} if new else dict(self.db.execute('SELECT * FROM products WHERE id=?',(product_id,)).fetchone())
+            if not new and not record:raise ValueError('Product no longer exists.')
+            dialog=tk.Toplevel(self.root)
+            dialog.title('Add product' if new else 'Edit product')
+            dialog.transient(self.root);dialog.grab_set();dialog.resizable(False,False)
+            fields={}
+            for i,key in enumerate(('sku','barcode','name','description','price','cost','qty')):
+                ttk.Label(dialog,text=key.replace('_',' ').title()).grid(row=i,column=0,padx=12,pady=7,sticky='w')
+                initial=(f"{record.get(key,0)/100:.2f}" if key in ('price','cost') and record else
+                         str(record.get(key) if record.get(key) is not None else ('0' if key in ('price','cost','qty') else '')))
+                value=tk.StringVar(value=initial)
+                ttk.Entry(dialog,textvariable=value,width=42).grid(row=i,column=1,padx=12,pady=7)
+                fields[key]=value
+            options=supplier_choices(self.db)
+            labels=['Unassigned']+[f"{x['name']} (#{x['id']})" for x in options]
+            initial_supplier=record.get('supplier_id')
+            supplier_index=next((i for i,x in enumerate(options,1) if x['id']==initial_supplier),0)
+            ttk.Label(dialog,text='Primary supplier').grid(row=7,column=0,padx=12,pady=7,sticky='w')
+            supplier=ttk.Combobox(dialog,values=labels,state='readonly',width=39)
+            supplier.grid(row=7,column=1,padx=12,pady=7)
+            supplier.current(supplier_index)
+            ttk.Label(dialog,text='Only products assigned to a supplier appear in that supplier’s new POs.',
+                      foreground='#555555').grid(row=8,column=0,columnspan=2,padx=12,pady=(0,8))
+            def save():
+                try:
+                    vals={k:v.get().strip() for k,v in fields.items()}
+                    if not vals['sku'] or not vals['name']:raise ValueError('SKU and name are required.')
+                    quantity=int(vals['qty'])
+                    if quantity<0:raise ValueError('Stock cannot be negative.')
+                    unit_price=cents(vals['price']);cost=cents(vals['cost'])
+                    sid=options[supplier.current()-1]['id'] if supplier.current()>0 else None
+                    values=(vals['sku'],vals['barcode'],vals['name'],vals['description'],unit_price,cost,quantity,sid)
+                    with self.db:
+                        if new:
+                            self.db.execute('''INSERT INTO products(sku,barcode,name,description,price,cost,qty,supplier_id)
+                                               VALUES(?,?,?,?,?,?,?,?)''',values)
+                        else:
+                            self.db.execute('''UPDATE products SET sku=?,barcode=?,name=?,description=?,price=?,cost=?,qty=?,supplier_id=?
+                                               WHERE id=?''',(*values,product_id))
+                except (ValueError,sqlite3.IntegrityError) as exc:
+                    messagebox.showerror('Product',str(exc),parent=dialog)
+                    return
+                dialog.destroy();refresh()
+            ttk.Button(dialog,text='Save product',command=save).grid(row=9,column=1,sticky='e',padx=12,pady=12)
+            ttk.Button(dialog,text='Cancel',command=dialog.destroy).grid(row=9,column=0,sticky='w',padx=12,pady=12)
+            dialog.wait_window()
         def attach_image():
             id=self.selected(tree)
             path=filedialog.askopenfilename(filetypes=[('Image files','*.png *.jpg *.jpeg *.gif')])
@@ -515,14 +564,15 @@ class BusinessDesk(BaseApp):
             try:
                 from PIL import Image,ImageTk
                 img=Image.open(r['image_path']);img.thumbnail((700,500));photo=ImageTk.PhotoImage(img)
-            except ImportError:
-                photo=tk.PhotoImage(file=r['image_path'])
+            except ImportError:photo=tk.PhotoImage(file=r['image_path'])
             label=tk.Label(win,image=photo);label.image=photo;label.pack(padx=10,pady=10)
         self.button(bar,'Add product',lambda:edit(True));self.button(bar,'Edit',edit)
         self.button(bar,'Import products from Excel',lambda:self.import_excel_dialog('products'))
         self.button(bar,'Attach image',attach_image);self.button(bar,'View image',view_image)
-        self.button(bar,'Export catalog CSV',lambda:self.export('SELECT sku,barcode,name,description,price/100.0 AS price,cost/100.0 AS cost,qty,image_path FROM products'))
-        ttk.Label(p,text='USB barcode scanners that type a barcode and Enter work in the search box.').pack(anchor='w')
+        self.button(bar,'Export catalog CSV',lambda:self.export('''SELECT p.sku,p.barcode,p.name,p.description,
+            p.price/100.0 AS price,p.cost/100.0 AS cost,p.qty,s.name AS supplier,p.image_path
+            FROM products p LEFT JOIN suppliers s ON s.id=p.supplier_id'''))
+        ttk.Label(p,text='Select a primary supplier to include a product in that supplier’s purchase orders.').pack(anchor='w')
         refresh()
     def documents(self,p):
         super().documents(p)
@@ -621,6 +671,81 @@ class BusinessDesk(BaseApp):
         window.wait_window()
         return result['value']
 
+    def select_po_products(self,supplier_id):
+        """Choose PO items for one supplier without entering internal product IDs."""
+        products=products_for_supplier(self.db,supplier_id)
+        supplier_row=self.db.execute('SELECT name FROM suppliers WHERE id=?',(supplier_id,)).fetchone()
+        supplier_name=supplier_row['name'] if supplier_row else 'selected supplier'
+        if not products:
+            messagebox.showinfo('No products for supplier',
+                'No catalog products are assigned to this supplier.\n\n'
+                'Open Products / Catalog, edit the products, and choose this supplier.\n'
+                'You can also import product assignments using the Supplier Excel column.',
+                parent=self.root)
+            return None
+        dialog=tk.Toplevel(self.root)
+        dialog.title(f'New Purchase Order — {supplier_name}')
+        dialog.transient(self.root);dialog.grab_set();dialog.geometry('780x510')
+        top=ttk.Frame(dialog,padding=14);top.pack(fill='x')
+        ttk.Label(top,text=f'Product supplied by {supplier_name}').grid(row=0,column=0,sticky='w')
+        labels=[f"{p['sku']} — {p['name']}" for p in products]
+        chosen=ttk.Combobox(top,values=labels,state='readonly',width=54)
+        chosen.grid(row=1,column=0,columnspan=3,sticky='ew',pady=(4,14))
+        ttk.Label(top,text='Quantity').grid(row=2,column=0,sticky='w')
+        ttk.Label(top,text='Unit cost ($)').grid(row=2,column=1,sticky='w')
+        quantity=tk.StringVar(value='1');cost=tk.StringVar()
+        ttk.Entry(top,textvariable=quantity,width=12).grid(row=3,column=0,sticky='w',pady=5)
+        ttk.Entry(top,textvariable=cost,width=16).grid(row=3,column=1,sticky='w',pady=5)
+        def choice_changed(_=None):
+            index=chosen.current()
+            if index>=0:cost.set(f"{products[index]['cost']/100:.2f}")
+        chosen.bind('<<ComboboxSelected>>',choice_changed)
+        selected=[]
+        table=ttk.Treeview(dialog,columns=('SKU','Product','Quantity','Unit cost','Line total'),show='headings',height=10)
+        for title,width in [('SKU',115),('Product',265),('Quantity',75),('Unit cost',110),('Line total',110)]:
+            table.heading(title,text=title);table.column(title,width=width)
+        table.pack(fill='both',expand=True,padx=14,pady=(5,10))
+        total_label=ttk.Label(dialog,text='Order total: $0.00',font=('Segoe UI',11,'bold'))
+        total_label.pack(anchor='e',padx=16)
+        def refresh_total():
+            total_label.configure(text=f"Order total: {money(sum(q*c for _,q,c in selected))}")
+        def add():
+            index=chosen.current()
+            if index<0:
+                messagebox.showwarning('Choose product','Select a product from the dropdown.',parent=dialog);return
+            product=products[index]
+            try:
+                qty=int(quantity.get())
+                if qty<1:raise ValueError('Quantity must be at least 1.')
+                unit_cost=cents(cost.get())
+            except ValueError as exc:
+                messagebox.showerror('Invalid PO line',str(exc),parent=dialog);return
+            if any(pid==product['id'] for pid,_,_ in selected):
+                messagebox.showwarning('Duplicate product','This product is already on the PO. Remove its line to change the quantity or cost.',parent=dialog)
+                return
+            selected.append((product['id'],qty,unit_cost))
+            table.insert('','end',values=(product['sku'],product['name'],qty,money(unit_cost),money(qty*unit_cost)))
+            refresh_total()
+        def remove():
+            for index in sorted((table.index(iid) for iid in table.selection()),reverse=True):
+                selected.pop(index)
+                table.delete(table.get_children()[index])
+            refresh_total()
+        bar=ttk.Frame(dialog,padding=10);bar.pack(fill='x')
+        ttk.Button(top,text='Add to PO',command=add).grid(row=3,column=2,sticky='e',padx=14)
+        ttk.Button(bar,text='Remove selected line',command=remove).pack(side='left')
+        result={'items':None}
+        def done():
+            if not selected:
+                messagebox.showwarning('Empty PO','Add at least one supplier product.',parent=dialog);return
+            result['items']=list(selected);dialog.destroy()
+        ttk.Button(bar,text='Cancel',command=dialog.destroy).pack(side='right',padx=5)
+        ttk.Button(bar,text='Create purchase order',command=done).pack(side='right',padx=5)
+        dialog.bind('<Escape>',lambda _:dialog.destroy())
+        dialog.protocol('WM_DELETE_WINDOW',dialog.destroy)
+        dialog.wait_window()
+        return result['items']
+
     def purchase_orders(self,p):
         bar=ttk.Frame(p);bar.pack(fill='x')
         tree=self.table(p,('ID','Supplier','Ordered','Status','Total'))
@@ -636,26 +761,14 @@ class BusinessDesk(BaseApp):
             with self.db:self.db.execute('INSERT INTO suppliers(name,email,phone,address) VALUES(?,?,?,?)',tuple(v.values()))
             messagebox.showinfo('Supplier added','Supplier saved.')
         def create():
-            v=self.select_po_supplier()
-            if not v:return
-            sid=v['supplier_id']
-            items=[]
-            while True:
-                pid=simpledialog.askinteger('PO line','Product ID (Cancel to finish)',parent=self.root,minvalue=1)
-                if pid is None:break
-                product=self.db.execute('SELECT * FROM products WHERE id=?',(pid,)).fetchone()
-                if not product:messagebox.showerror('Product','Unknown product');continue
-                qty=simpledialog.askinteger('PO quantity',f'{product["name"]}: quantity',parent=self.root,minvalue=1)
-                if qty is None:continue
-                price=simpledialog.askstring('Unit cost',f'{product["name"]}: cost in dollars',initialvalue=f'{product["cost"]/100:.2f}',parent=self.root)
-                if price is None:continue
-                items.append((pid,qty,cents(price)))
+            selection=self.select_po_supplier()
+            if not selection:return
+            supplier_id=selection['supplier_id']
+            items=self.select_po_products(supplier_id)
             if not items:return
-            total=sum(q*c for _,q,c in items)
-            with self.db:
-                cur=self.db.execute('INSERT INTO purchase_orders(supplier_id,ordered_on,notes,total) VALUES(?,?,?,?)',
-                                    (sid,datetime.now().strftime('%Y-%m-%d'),v['notes'],total))
-                self.db.executemany('INSERT INTO po_items(po_id,product_id,qty,unit_cost) VALUES(?,?,?,?)',[(cur.lastrowid,*i) for i in items])
+            po_id=create_supplier_po(self.db,supplier_id,selection['notes'],items,
+                                     datetime.now().strftime('%Y-%m-%d'))
+            messagebox.showinfo('Purchase order created',f'Purchase order #{po_id} saved for the selected supplier.')
             refresh()
         def receive():
             id=self.selected(tree)

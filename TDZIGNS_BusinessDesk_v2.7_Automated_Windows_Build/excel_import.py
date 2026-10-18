@@ -29,6 +29,7 @@ HEADERS = {
         'price': ('price','selling price','sale price','retail price','unit price'),
         'cost': ('cost','unit cost','purchase cost'),
         'qty': ('qty','quantity','stock','on hand','stock quantity','quantity on hand'),
+        'supplier': ('supplier','supplier name','vendor','vendor name','primary supplier'),
     }
 }
 REQUIRED = {'customers': ('name',), 'products': ('sku','name','price'), 'suppliers': ('name',)}
@@ -74,7 +75,7 @@ def parse(kind, values):
     except (InvalidOperation,ValueError):
         raise ValueError("Quantity must be a nonnegative whole number")
     return dict(sku=sku,name=name,barcode=val('barcode'),description=val('description'),
-                price=amount(val('price')),cost=amount(val('cost')),qty=int(q))
+                price=amount(val('price')),cost=amount(val('cost') or '0'),qty=int(q),supplier=val('supplier'))
 
 def read_excel(path,kind,sheet_name=None):
     from openpyxl import load_workbook
@@ -103,6 +104,8 @@ def import_rows(db,kind,rows,mode='skip'):
     mode=skip or update. Inventory quantities in update mode are absolute counts.
     """
     if kind not in HEADERS or mode not in ('skip','update'):raise ValueError("Invalid import settings")
+    from supplier_catalog import lookup_supplier_id, validate_supplier_rows
+    if kind=='products':validate_supplier_rows(db,rows)
     created=updated=skipped=0
     # Fail fast for duplicate keys inside the workbook.
     keys=set()
@@ -132,14 +135,16 @@ def import_rows(db,kind,rows,mode='skip'):
             else:
                 existing=db.execute("SELECT id FROM products WHERE sku=? COLLATE NOCASE",(v['sku'],)).fetchone()
                 barcode=v['barcode'] or None
+                supplier_id=lookup_supplier_id(db,v.get('supplier',''))
                 if existing:
                     if mode=='skip':skipped+=1;continue
-                    db.execute("""UPDATE products SET name=?,description=?,price=?,cost=?,qty=?,barcode=? WHERE id=?""",
-                               (v['name'],v['description'],v['price'],v['cost'],v['qty'],barcode,existing[0]))
+                    db.execute("""UPDATE products SET name=?,description=?,price=?,cost=?,qty=?,barcode=?,
+                                 supplier_id=COALESCE(?,supplier_id) WHERE id=?""",
+                               (v['name'],v['description'],v['price'],v['cost'],v['qty'],barcode,supplier_id,existing[0]))
                     updated+=1
                 else:
-                    db.execute("""INSERT INTO products(sku,name,description,price,cost,qty,barcode)
-                               VALUES(?,?,?,?,?,?,?)""",
-                               (v['sku'],v['name'],v['description'],v['price'],v['cost'],v['qty'],barcode))
+                    db.execute("""INSERT INTO products(sku,name,description,price,cost,qty,barcode,supplier_id)
+                               VALUES(?,?,?,?,?,?,?,?)""",
+                               (v['sku'],v['name'],v['description'],v['price'],v['cost'],v['qty'],barcode,supplier_id))
                     created+=1
     return created,updated,skipped
