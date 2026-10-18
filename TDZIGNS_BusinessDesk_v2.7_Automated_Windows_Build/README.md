@@ -169,3 +169,26 @@ Alternatively, push the tag `v2.7.0` to the repository. The workflow then publis
 IMPORTANT: If your existing BusinessDesk updater supports local ZIP packages, it can consume the generated compiled update ZIP without replacing the updater first. The updater expects `TDZIGNS_BusinessDesk.exe` at the root of the *inner* ZIP, not the source ZIP or GitHub Actions artifact ZIP.
 
 Do not publish untrusted binaries. Verify GitHub Actions logs and test the new EXE on Windows before deploying to production. The build workflow has not been executed in this environment.
+
+
+## 2.8.0 — One-click update checks through GitHub Releases
+
+When running the compiled Windows app, the **Updates / Branding → Check GitHub for updates** button uses the preconfigured public release URL:
+
+`https://github.com/combatengineer88/BusinessDesk/releases/latest/download/update_manifest.json`
+
+The updater compares versions, asks before installing, downloads and SHA-256-verifies the package, backs up the database and existing executable, and runs the PowerShell installer for restart or rollback. Administrator login is required. The optional check-at-login toggle also uses this URL even if nothing has been manually saved.
+
+### Configure this particular GitHub repository
+
+The repository currently stores application sources under `TDZIGNS_BusinessDesk_v2.7_Automated_Windows_Build/`. **Keep that folder name for now** because the workflow refers to it. Upload the v2.8 source files from this ZIP into that existing folder, replacing the existing files, and place the updated workflow at repository root `.github/workflows/windows-release.yml`.
+
+After committing those files to `main`, create and push an exact version tag `v2.8.0` from the new commit. The root workflow is triggered by tags `v*`, builds a Windows EXE, creates a ZIP, checksum and manifest, and publishes all three assets on the public **GitHub Releases** page, marked latest. **A normal Actions run via Run workflow only creates an Actions artifact; it does not publish a release, and the app cannot see those artifacts through the Releases URL.**
+
+To create a tag using the GitHub website: open Releases → Draft a new release → Choose a tag → Create new tag `v2.8.0` on `main` → publish the release. **However**, creating the release *before* the tag-triggered workflow finishes can conflict with the `gh release create` step. Prefer creating the tag via Git on your computer (`git tag v2.8.0` then `git push origin v2.8.0`) so the workflow publishes the release itself. Alternatively edit the workflow to upload into an already-existing release.
+
+After GitHub Actions finishes, check the repo **Releases** page for the three assets: `TDZIGNS_BusinessDesk_2.8.0.zip`, `TDZIGNS_BusinessDesk_2.8.0.sha256`, `update_manifest.json`. The manifest's URL points to the first ZIP and includes its SHA-256. Test the update on a nonproduction database.
+
+**Bootstrap:** Older compiled BusinessDesk versions do not yet have the built-in GitHub Releases URL. Install 2.8.0 once using the older local update feature (download the compiled 2.8.0 ZIP from GitHub Releases). All later versions can be installed by clicking **Check GitHub for updates**.
+
+The source ZIP created by ChatGPT is not itself a compiled update and does not install through the app. No Windows build or release has been executed from this environment.

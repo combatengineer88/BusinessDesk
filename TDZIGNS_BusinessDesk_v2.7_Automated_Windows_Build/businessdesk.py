@@ -11,8 +11,10 @@ from tkinter import ttk, messagebox, filedialog, simpledialog
 from core_v1 import App as BaseApp, DB, DATA, cents, money
 from sales_workflow import convert_estimate, record_invoice_payment
 
-VERSION = '2.7.0'
+VERSION = '2.8.0'
 BUSINESS = 'TDZIGNS LLC'
+RELEASE_MANIFEST_URL = 'https://github.com/combatengineer88/BusinessDesk/releases/latest/download/update_manifest.json'
+TRUSTED_RELEASE_PREFIX = 'https://github.com/combatengineer88/BusinessDesk/releases/download/'
 MEDIA = DATA / 'product_images'
 MEDIA.mkdir(exist_ok=True)
 
@@ -182,8 +184,8 @@ class BusinessDesk(BaseApp):
         if not getattr(self,'_update_checked',False):
             self._update_checked=True
             cfg=self.db.execute('SELECT manifest_url,check_at_launch FROM update_settings WHERE id=1').fetchone()
-            if cfg and cfg['check_at_launch'] and cfg['manifest_url']:
-                self.root.after(600,lambda url=cfg['manifest_url']:self.check_updates(url))
+            if cfg and cfg['check_at_launch']:
+                self.root.after(600,lambda url=(cfg['manifest_url'] or RELEASE_MANIFEST_URL):self.check_updates(url))
     def _on_tab_changed(self,event):
         # Refresh dashboard when revisited; do not rebuild the whole notebook.
         selected=self.tabs.select()
@@ -628,8 +630,8 @@ class BusinessDesk(BaseApp):
         ttk.Separator(p).pack(fill='x',pady=16)
         ttk.Label(p,text=f'Installed version: {VERSION}').pack(anchor='w')
         row=self.db.execute('SELECT * FROM update_settings WHERE id=1').fetchone()
-        url=tk.StringVar(value=row['manifest_url']);auto=tk.BooleanVar(value=bool(row['check_at_launch']))
-        ttk.Label(p,text='HTTPS update manifest URL (optional; no URL configured by default)').pack(anchor='w',pady=4)
+        url=tk.StringVar(value=row['manifest_url'] or RELEASE_MANIFEST_URL);auto=tk.BooleanVar(value=bool(row['check_at_launch']))
+        ttk.Label(p,text='GitHub Releases update feed (configured automatically; advanced users may change it)').pack(anchor='w',pady=4)
         ttk.Entry(p,textvariable=url,width=90).pack(anchor='w',pady=4)
         ttk.Checkbutton(p,text='Check for updates at sign-in (requires internet)',variable=auto).pack(anchor='w',pady=6)
         def save():
@@ -637,11 +639,11 @@ class BusinessDesk(BaseApp):
             with self.db:self.db.execute('UPDATE update_settings SET manifest_url=?,check_at_launch=? WHERE id=1',(url.get().strip(),int(auto.get())))
             messagebox.showinfo('Saved','Update preferences saved.')
         self.button(p,'Save update settings',save)
-        self.button(p,'Check for update',lambda:self.check_updates(url.get().strip()))
+        self.button(p,'Check GitHub for updates',lambda:self.check_updates(url.get().strip() or RELEASE_MANIFEST_URL))
         self.button(p,'Install local ZIP or EXE',self.choose_local_update)
         self.button(p,'Select update folder',self.choose_update_folder)
 
-        ttk.Label(p,text='EXE installations: download, verify, back up, install and restart directly from this tab. Source-code runs require a one-time EXE build. Configure a trusted HTTPS manifest URL.',wraplength=850).pack(anchor='w',pady=12)
+        ttk.Label(p,text='Click Check GitHub for updates to download and install the newest published release. An administrator must approve installation. The repository must publish a tagged GitHub Release with a compiled update ZIP and manifest. Local ZIP/EXE installation remains available.',wraplength=850).pack(anchor='w',pady=12)
     def choose_update_folder(self):
         folder=filedialog.askdirectory(title='Choose folder containing a Windows update ZIP or EXE')
         if not folder:return
@@ -675,7 +677,7 @@ class BusinessDesk(BaseApp):
                 if archive.getinfo(names[0]).file_size<100000:
                     raise ValueError('Windows executable is unexpectedly small.')
         else:raise ValueError('Choose a compiled Windows .exe or installable .zip file.')
-        match=re.search(r'(\\d+\\.\\d+\\.\\d+)',package.stem)
+        match=re.search(r'(\d+\.\d+\.\d+)',package.stem)
         version=match.group(1) if match else 'unknown'
         if version!='unknown' and tuple(map(int,version.split('.')))<=tuple(map(int,VERSION.split('.'))):
             raise ValueError('Selected update version is not newer than the installed version.')
@@ -691,22 +693,28 @@ class BusinessDesk(BaseApp):
         self.offer_install(package,digest,version)
 
     def check_updates(self,url):
-        if not url:raise ValueError('Set a trusted HTTPS update manifest URL first.')
+        url=url or RELEASE_MANIFEST_URL
         if not url.lower().startswith('https://'):raise ValueError('Only HTTPS update manifests are allowed.')
         def worker():
             try:
-                with urllib.request.urlopen(url,timeout=12) as resp:
-                    manifest=json.load(resp)
+                with urllib.request.urlopen(urllib.request.Request(url,headers={'User-Agent':'TDZIGNS-BusinessDesk-Updater/2.8'}),timeout=15) as resp:
+                    if int(resp.headers.get('Content-Length') or '0')>65536:raise ValueError('Update manifest is too large.')
+                    manifest=json.loads(resp.read(65537))
+                    if not isinstance(manifest,dict):raise ValueError('Invalid manifest response.')
                 version=str(manifest['version']);download=str(manifest['url']);digest=str(manifest['sha256']).lower()
                 if not re.fullmatch(r'\d+\.\d+\.\d+',version) or not download.startswith('https://') or len(digest)!=64 or any(c not in '0123456789abcdef' for c in digest):
                     raise ValueError('Invalid update manifest.')
+                if url==RELEASE_MANIFEST_URL and not download.startswith(TRUSTED_RELEASE_PREFIX):
+                    raise ValueError('GitHub release manifest points outside the trusted repository.')
                 def ask():
                     if tuple(map(int,version.split('.')))<=tuple(map(int,VERSION.split('.'))):
                         messagebox.showinfo('Updates','Already up to date; no newer release available.');return
                     if not messagebox.askyesno('Update available',f'Version {version} is available. Download the verified package?'):return
                     threading.Thread(target=lambda:self.download_update(download,digest,version),daemon=True).start()
                 self.root.after(0,ask)
-            except Exception as e:self.root.after(0,lambda msg=str(e):messagebox.showerror('Update check failed',msg))
+            except Exception as e:
+                msg = ('No published GitHub Release update was found. Publish a version tag (for example v2.8.0) and allow the Windows release workflow to finish first.' if getattr(e,'code',None)==404 and url==RELEASE_MANIFEST_URL else str(e))
+                self.root.after(0,lambda error=msg:messagebox.showerror('Update check failed',error))
         threading.Thread(target=worker,daemon=True).start()
     def download_update(self,url,digest,version):
         try:
@@ -715,7 +723,7 @@ class BusinessDesk(BaseApp):
             target=folder/f'BusinessDesk_{safe}.zip'
             temp=target.with_suffix('.download')
             sha=hashlib.sha256()
-            with urllib.request.urlopen(url,timeout=30) as resp,open(temp,'wb') as f:
+            with urllib.request.urlopen(urllib.request.Request(url,headers={'User-Agent':'TDZIGNS-BusinessDesk-Updater/2.8'}),timeout=40) as resp,open(temp,'wb') as f:
                 length=0
                 while True:
                     chunk=resp.read(65536)
