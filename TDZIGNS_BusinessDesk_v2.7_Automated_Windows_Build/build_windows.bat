@@ -2,12 +2,23 @@
 cd /d "%~dp0"
 py -3.12 -m pip install -r requirements.txt pyinstaller
 if errorlevel 1 goto fail
-py -3.12 -m PyInstaller --noconfirm --clean --onedir --windowed --name TDZIGNS_BusinessDesk --collect-all reportlab --collect-all PIL --collect-all openpyxl --hidden-import excel_import --hidden-import supplier_catalog --hidden-import release_layout --add-data "update_installer.ps1;." launcher.py
+py -3.12 -m PyInstaller --noconfirm --clean --onedir --windowed --name TDZIGNS_BusinessDesk --collect-all reportlab --collect-all PIL --collect-all openpyxl --hidden-import excel_import --hidden-import supplier_catalog --hidden-import release_layout --hidden-import installer_assets --add-data "update_installer.ps1;." --add-data "installer_update.ps1;." launcher.py
 if errorlevel 1 goto fail
 if not exist "dist\TDZIGNS_BusinessDesk\_internal\python312.dll" goto fail
 py -3.12 package_release.py
 if errorlevel 1 goto fail
-echo Ready-to-install update ZIP created.
+set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
+if not exist "%ISCC%" (
+  echo Windows Setup was not built: install Inno Setup 6 from jrsoftware.org
+  echo The update ZIP was created successfully.
+  pause
+  exit /b 0
+)
+"%ISCC%" /DBuildVersion=2.9.7 "businessdesk.iss"
+if errorlevel 1 goto fail
+py -3.12 package_setup.py
+if errorlevel 1 goto fail
+echo BusinessDesk Setup EXE and update ZIP created successfully.
 pause
 exit /b 0
 :fail

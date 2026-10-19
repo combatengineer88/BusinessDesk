@@ -14,8 +14,9 @@ from supplier_catalog import supplier_choices, products_for_supplier, create_sup
 from update_support import read_status, signal_ready, STATUS_NAME
 from install_location import choose_install_target, is_temporary_install
 from release_layout import valid_release_names, inspect_release
+from installer_assets import select_update_asset, validate_setup_file
 
-VERSION = '2.9.6'
+VERSION = '2.9.7'
 BUSINESS = 'TDZIGNS LLC'
 RELEASE_MANIFEST_URL = 'https://github.com/combatengineer88/BusinessDesk/releases/latest/download/update_manifest.json'
 TRUSTED_RELEASE_PREFIX = 'https://github.com/combatengineer88/BusinessDesk/releases/download/'
@@ -955,10 +956,10 @@ class BusinessDesk(BaseApp):
         self.button(p,'Open application folder',self.open_application_folder)
         self.button(p,'Open update log',self.open_update_log)
         self.button(p,'Check GitHub for updates',lambda:self.check_updates(url.get().strip() or RELEASE_MANIFEST_URL))
-        self.button(p,'Install local GitHub update ZIP',self.choose_local_update)
+        self.button(p,'Install local Windows Setup or update ZIP',self.choose_local_update)
         self.button(p,'Select update folder',self.choose_update_folder)
 
-        ttk.Label(p,text='Check GitHub for the latest release and install its verified ZIP. BusinessDesk installs to your permanent per-user Programs folder and restarts automatically. Keep the EXE and _internal folder together.',wraplength=850).pack(anchor='w',pady=12)
+        ttk.Label(p,text='Check GitHub for the latest release and install its verified Windows Setup package. Setup registers BusinessDesk in Windows Installed Apps and preserves your separate business database. Older releases can still use ZIP updates.',wraplength=850).pack(anchor='w',pady=12)
     def open_application_folder(self):
         path=Path(sys.executable if getattr(sys,'frozen',False) else __file__).resolve().parent
         if sys.platform=='win32':os.startfile(str(path))
@@ -973,18 +974,18 @@ class BusinessDesk(BaseApp):
         else:messagebox.showinfo('Update diagnostics',str(log))
 
     def choose_update_folder(self):
-        folder=filedialog.askdirectory(title='Choose folder containing a Windows update ZIP')
+        folder=filedialog.askdirectory(title='Choose folder containing BusinessDesk Setup EXE or update ZIP')
         if not folder:return
-        packages=sorted(list(Path(folder).glob('*.zip')))
+        packages=sorted(list(Path(folder).glob('*.zip'))+list(Path(folder).glob('TDZIGNS_BusinessDesk_Setup_*.exe')))
         if not packages:
-            raise ValueError('No ZIP update packages were found in the selected directory.')
+            raise ValueError('No BusinessDesk setup EXE or update ZIP found in the selected directory.')
         selected=filedialog.askopenfilename(title='Select update package',initialdir=folder,
-            filetypes=[('Windows update ZIP','*.zip')])
+            filetypes=[('BusinessDesk installation packages','*.exe *.zip')])
         if selected:self.load_local_update(Path(selected))
 
     def choose_local_update(self):
         selected=filedialog.askopenfilename(title='Select Windows update package',
-            filetypes=[('Windows update ZIP','*.zip')])
+            filetypes=[('BusinessDesk installation packages','*.exe *.zip')])
         if selected:self.load_local_update(Path(selected))
 
     def load_local_update(self,package):
@@ -992,7 +993,7 @@ class BusinessDesk(BaseApp):
         if not package.is_file():raise FileNotFoundError('Selected update file does not exist.')
         if package.stat().st_size>200*1024*1024:raise ValueError('Update exceeds 200 MB.')
         if package.suffix.lower()=='.exe':
-            raise ValueError('This release requires its _internal runtime folder. Select the complete GitHub update ZIP, not a standalone EXE.')
+            validate_setup_file(package)
         elif package.suffix.lower()=='.zip':
             with zipfile.ZipFile(package) as archive:
                 names=[n for n in archive.namelist() if not n.endswith('/')]
@@ -1003,7 +1004,7 @@ class BusinessDesk(BaseApp):
                     raise ValueError('Update ZIP must contain the EXE and _internal Python runtime folder at its root.')
                 if archive.getinfo('TDZIGNS_BusinessDesk.exe').file_size<100000:
                     raise ValueError('Windows executable is unexpectedly small.')
-        else:raise ValueError('Choose the installable GitHub release .zip file.')
+        else:raise ValueError('Choose a BusinessDesk Setup EXE or complete GitHub release ZIP.')
         match=re.search(r'(\d+\.\d+\.\d+)',package.stem)
         version=match.group(1) if match else 'unknown'
         if version!='unknown' and tuple(map(int,version.split('.')))<=tuple(map(int,VERSION.split('.'))):
@@ -1028,11 +1029,11 @@ class BusinessDesk(BaseApp):
                     if int(resp.headers.get('Content-Length') or '0')>65536:raise ValueError('Update manifest is too large.')
                     manifest=json.loads(resp.read(65537))
                     if not isinstance(manifest,dict):raise ValueError('Invalid manifest response.')
-                version=str(manifest['version']);download=str(manifest['url']);digest=str(manifest['sha256']).lower()
-                if not re.fullmatch(r'\d+\.\d+\.\d+',version) or not download.startswith('https://') or len(digest)!=64 or any(c not in '0123456789abcdef' for c in digest):
-                    raise ValueError('Invalid update manifest.')
-                if url==RELEASE_MANIFEST_URL and not download.startswith(TRUSTED_RELEASE_PREFIX):
-                    raise ValueError('GitHub release manifest points outside the trusted repository.')
+                version,download,digest,kind=select_update_asset(
+                    manifest, trusted_prefix=TRUSTED_RELEASE_PREFIX if url==RELEASE_MANIFEST_URL else None)
+                # The preferred asset is a standard Windows installer, which
+                # handles files, shortcuts and Installed Apps registration.
+                # Older GitHub releases remain ZIP compatible.
                 def ask():
                     if tuple(map(int,version.split('.')))<=tuple(map(int,VERSION.split('.'))):
                         messagebox.showinfo('Updates','Already up to date; no newer release available.');return
@@ -1047,7 +1048,7 @@ class BusinessDesk(BaseApp):
         try:
             folder=DATA/'updates';folder.mkdir(exist_ok=True)
             safe=''.join(c for c in version if c.isalnum() or c in '.-_')[:45]
-            target=folder/f'BusinessDesk_{safe}.zip'
+            target=folder/(f'TDZIGNS_BusinessDesk_Setup_{safe}.exe' if url.lower().split('?',1)[0].endswith('.exe') else f'BusinessDesk_{safe}.zip')
             temp=target.with_suffix('.download')
             sha=hashlib.sha256()
             with urllib.request.urlopen(urllib.request.Request(url,headers={'User-Agent':'TDZIGNS-BusinessDesk-Updater/2.8'}),timeout=40) as resp,open(temp,'wb') as f:
@@ -1077,9 +1078,12 @@ class BusinessDesk(BaseApp):
         target,temporary=choose_install_target(Path(sys.executable).resolve(),os.environ.get('LOCALAPPDATA',str(DATA.parent)),os.environ.get('TEMP',''))
         explanation=('BusinessDesk is running from a temporary ZIP location. It will be installed permanently, and desktop/Start Menu shortcuts will be created.'
                      if temporary else 'The installed application folder will be updated and its previous version backed up.')
+        installer_package=Path(package).suffix.lower()=='.exe'
         if messagebox.askyesno('Install update',
-            f'Install TDZIGNS BusinessDesk {version} now?\n\nInstallation location:\n{target}\n\n{explanation}\n\n'
-            'BusinessDesk will back up its database, close, replace its application folder, and restart.\nSave any other work first.'):
+            f'Install TDZIGNS BusinessDesk {version} now?\n\nInstallation location:\n{target}\n\n{explanation}\n\n'+
+            ('Windows Setup will register the app, create shortcuts, and preserve your separate business database.\n' if installer_package
+             else 'The installed application folder will be replaced, keeping a backup.\n')+
+            'BusinessDesk will close and restart after installation. Save your work first.'):
             self.install_update(package,digest,version)
 
     def install_update(self,package,digest,version=''):
@@ -1087,6 +1091,9 @@ class BusinessDesk(BaseApp):
             raise ValueError('Automatic installation is only supported from the packaged Windows EXE.')
         if self.user['role']!='admin':raise PermissionError('Administrator login required.')
         if getattr(self,'_updating',False):raise RuntimeError('An update is already being prepared.')
+        if Path(package).suffix.lower()=='.exe':
+            self.install_setup_update(package,digest,version)
+            return
         current_executable=Path(sys.executable).resolve()
         install_target,migrating=choose_install_target(current_executable,os.environ.get('LOCALAPPDATA',str(DATA.parent)),os.environ.get('TEMP',''))
         executable=Path(install_target)
@@ -1142,6 +1149,50 @@ class BusinessDesk(BaseApp):
         except OSError as exc:
             (updates/STATUS_NAME).write_text(json.dumps({**status,'status':'failed','message':str(exc)},indent=2),encoding='utf-8')
             raise RuntimeError('Could not start PowerShell updater; BusinessDesk is still open: '+str(exc)) from exc
+        self._updating=True
+        self._update_worker=worker
+        self._update_handoff=handoff
+        self._update_attempt=attempt
+        self._update_deadline=datetime.now().timestamp()+75
+        self._poll_update_handoff()
+
+    def install_setup_update(self,package,digest,version):
+        """Launch a detached verified Windows Setup, without closing before handoff."""
+        if not (getattr(sys,'frozen',False) and sys.platform=='win32'):
+            raise RuntimeError('Windows Setup auto-installation requires the packaged Windows application.')
+        if self.user['role']!='admin':raise PermissionError('Administrator login required.')
+        validate_setup_file(package)
+        with open(package,'rb') as f:
+            actual=hashlib.file_digest(f,'sha256').hexdigest()
+        if actual!=digest:raise ValueError('Windows Setup checksum mismatch; installation cancelled.')
+        target,_=choose_install_target(Path(sys.executable).resolve(),
+                                       os.environ.get('LOCALAPPDATA',str(DATA.parent)),
+                                       os.environ.get('TEMP',''))
+        updates=DATA/'updates';updates.mkdir(parents=True,exist_ok=True)
+        backup=updates/('pre_setup_'+datetime.now().strftime('%Y%m%d_%H%M%S')+'.db')
+        with sqlite3.connect(str(backup)) as destination:self.db.backup(destination)
+        helper_src=Path(getattr(sys,'_MEIPASS',Path(__file__).parent))/'installer_update.ps1'
+        if not helper_src.is_file():
+            raise FileNotFoundError('Windows Setup updater helper is missing from this build.')
+        helper=updates/('installer_update_'+uuid.uuid4().hex+'.ps1')
+        shutil.copy2(helper_src,helper)
+        attempt=uuid.uuid4().hex
+        handoff=updates/('handoff_'+attempt+'.ready')
+        status={'status':'handoff','version':version,'attempt_id':attempt,'target':str(target),
+                'message':'Verifying Windows Setup before closing the application.',
+                'log':str(updates/'installation.log')}
+        (updates/STATUS_NAME).write_text(json.dumps(status,indent=2),encoding='utf-8')
+        args=['powershell.exe','-NoProfile','-NonInteractive','-STA','-ExecutionPolicy','Bypass',
+              '-File',str(helper),'-Installer',str(package),'-Target',str(target),
+              '-ProcessIdToWait',str(os.getpid()),'-DataDir',str(DATA),
+              '-ExpectedSha256',digest,'-Version',str(version),
+              '-HandoffFile',str(handoff),'-AttemptId',attempt]
+        (updates/'Reopen BusinessDesk.cmd').write_text('@echo off\nstart "" "'+str(target)+'"\n',encoding='utf-8')
+        try:
+            worker=subprocess.Popen(args,creationflags=getattr(subprocess,'CREATE_NEW_CONSOLE',0),close_fds=True)
+        except OSError as exc:
+            (updates/STATUS_NAME).write_text(json.dumps({**status,'status':'failed','message':str(exc)},indent=2),encoding='utf-8')
+            raise RuntimeError('Unable to launch Windows Setup helper; the application remains open.') from exc
         self._updating=True
         self._update_worker=worker
         self._update_handoff=handoff

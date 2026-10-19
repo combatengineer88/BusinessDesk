@@ -34,8 +34,9 @@ jobs:
       - name: Validate Python and PowerShell scripts
         shell: pwsh
         run: |
-          python -m py_compile businessdesk.py core_v1.py launcher.py package_release.py release_layout.py
-          foreach ($script in @('update_installer.ps1','Install_Repair_v2.9.6.ps1','install_local_update.ps1')) {
+          python -m py_compile businessdesk.py core_v1.py launcher.py package_release.py package_setup.py installer_assets.py release_layout.py
+          python test_installer_assets.py
+          foreach ($script in @('update_installer.ps1','installer_update.ps1','install_local_update.ps1')) {
             $tokens=$null; $parseErrors=$null
             [Management.Automation.Language.Parser]::ParseFile((Resolve-Path $script).Path,[ref]$tokens,[ref]$parseErrors) | Out-Null
             if ($parseErrors.Count -gt 0) {throw "PowerShell parsing failed for $script : $($parseErrors -join ', ')"}
@@ -51,7 +52,7 @@ jobs:
       - name: Build BusinessDesk ONEDIR application
         shell: pwsh
         run: |
-          python -m PyInstaller --noconfirm --clean --onedir --windowed --name TDZIGNS_BusinessDesk --collect-all reportlab --collect-all PIL --collect-all openpyxl --hidden-import excel_import --hidden-import supplier_catalog --hidden-import release_layout --add-data "update_installer.ps1;." launcher.py
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --name TDZIGNS_BusinessDesk --collect-all reportlab --collect-all PIL --collect-all openpyxl --hidden-import excel_import --hidden-import supplier_catalog --hidden-import release_layout --hidden-import installer_assets --add-data "update_installer.ps1;." --add-data "installer_update.ps1;." launcher.py
           if (!(Test-Path 'dist/TDZIGNS_BusinessDesk/_internal/python312.dll')) {throw 'Built EXE missing python312.dll'}
           if (!(Test-Path 'dist/TDZIGNS_BusinessDesk/TDZIGNS_BusinessDesk.exe')) {throw 'Built EXE missing'}
           Get-ChildItem 'dist/TDZIGNS_BusinessDesk/_internal' -Filter 'vcruntime*.dll' | ForEach-Object {Write-Host "VC runtime: $($_.Name)"}
@@ -74,14 +75,66 @@ jobs:
           $zip=(Resolve-Path "TDZIGNS_BusinessDesk_$version.zip").Path
           $hash=(Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
           $data=Join-Path $env:RUNNER_TEMP 'BusinessDeskInstallerPreflight296'
-          $env:LOCALAPPDATA=$data
-          $target=Join-Path $data 'Programs\TDZIGNS BusinessDesk\TDZIGNS_BusinessDesk.exe'
+          $target=Join-Path $env:LOCALAPPDATA 'Programs\TDZIGNS BusinessDesk\TDZIGNS_BusinessDesk.exe'
           $updates=Join-Path $data 'updates'
           New-Item -ItemType Directory -Path $updates -Force | Out-Null
           $handoff=Join-Path $updates ('handoff_'+[guid]::NewGuid().ToString('N')+'.ready')
           & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\update_installer.ps1 -Package $zip -Target $target -ProcessIdToWait 0 -DataDir $data -ExpectedSha256 $hash -Version $version -AllowFreshInstall -HandoffFile $handoff -PrepareOnly
           if ($LASTEXITCODE -ne 0) {throw 'ONEDIR installer preflight failed'}
           if (!(Test-Path $handoff) -or (Get-Content -LiteralPath $handoff -Raw).Trim() -ne 'PREPARED') {throw 'Updater handoff not created'}
+      - name: Install Inno Setup 6 compiler
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          if ($LASTEXITCODE -ne 0) {throw "Inno Setup installation failed: $LASTEXITCODE"}
+          $compiler = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (!(Test-Path -LiteralPath $compiler)) {throw "Missing Inno Setup compiler: $compiler"}
+      - name: Build interactive Windows Setup EXE
+        shell: pwsh
+        run: |
+          $compiler = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          $version=(Select-String -Path 'businessdesk.py' -Pattern "^VERSION = '([0-9.]+)'").Matches.Groups[1].Value
+          & $compiler "/DBuildVersion=$version" 'businessdesk.iss'
+          if ($LASTEXITCODE -ne 0) {throw "Inno Setup compilation failed: $LASTEXITCODE"}
+          if (!(Test-Path "output/TDZIGNS_BusinessDesk_Setup_$version.exe")) {throw 'Windows Setup EXE was not generated'}
+      - name: Test full Windows Setup installation
+        shell: pwsh
+        run: |
+          $version=(Select-String -Path 'businessdesk.py' -Pattern "^VERSION = '([0-9.]+)'").Matches.Groups[1].Value
+          $setup=(Resolve-Path "output/TDZIGNS_BusinessDesk_Setup_$version.exe").Path
+          $dest=Join-Path $env:RUNNER_TEMP 'BusinessDeskInnoTest'
+          $log=Join-Path $env:RUNNER_TEMP 'BusinessDeskInnoTest.log'
+          $arguments='/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /SP- /DIR="'+$dest+'" /LOG="'+$log+'"'
+          $result=Start-Process -FilePath $setup -ArgumentList $arguments -PassThru -Wait
+          if ($result.ExitCode -ne 0) {throw "Windows Setup smoke test failed with code $($result.ExitCode); log: $log"}
+          $exe=Join-Path $dest 'TDZIGNS_BusinessDesk.exe'
+          if (!(Test-Path -LiteralPath $exe)) {throw "Installed application not found: $exe"}
+          if (!(Test-Path -LiteralPath (Join-Path $dest '_internal\python312.dll'))) {throw 'Installer omitted Python runtime DLL'}
+          $env:LOCALAPPDATA=Join-Path $env:RUNNER_TEMP 'BusinessDeskInnoSmokeData'
+          New-Item -ItemType Directory -Path $env:LOCALAPPDATA -Force | Out-Null
+          $probe=Start-Process -FilePath $exe -WorkingDirectory $dest -ArgumentList '--smoke-test' -PassThru -Wait
+          if ($probe.ExitCode -ne 0) {throw "Installed executable failed smoke test: $($probe.ExitCode)"}
+      - name: Verify Windows Setup updater handoff
+        shell: pwsh
+        run: |
+          $version=(Select-String -Path 'businessdesk.py' -Pattern "^VERSION = '([0-9.]+)'").Matches.Groups[1].Value
+          $setup=(Resolve-Path "output/TDZIGNS_BusinessDesk_Setup_$version.exe").Path
+          $checksum=(Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash
+          $data=Join-Path $env:RUNNER_TEMP 'BusinessDeskSetupHandoff'
+          $updates=Join-Path $data 'updates'
+          New-Item -ItemType Directory -Path $updates -Force | Out-Null
+          $handoff=Join-Path $updates ('handoff_'+[guid]::NewGuid().ToString('N')+'.ready')
+          $target=Join-Path $env:LOCALAPPDATA 'Programs\TDZIGNS BusinessDesk\TDZIGNS_BusinessDesk.exe'
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\installer_update.ps1 -Installer $setup -Target $target -ProcessIdToWait 0 -DataDir $data -ExpectedSha256 $checksum -Version $version -HandoffFile $handoff -PrepareOnly
+          if ($LASTEXITCODE -ne 0) {throw 'Windows Setup updater handoff verification failed'}
+          if (!(Test-Path $handoff) -or (Get-Content -LiteralPath $handoff -Raw).Trim() -ne 'PREPARED') {throw 'Setup updater did not acknowledge handoff'}
+      - name: Generate Setup checksum and GitHub manifest
+        shell: pwsh
+        run: python package_setup.py
+      - name: Validate combined update manifest
+        shell: pwsh
+        run: |
+          python -c "import json,installer_assets; m=json.load(open('update_manifest.json')); v,u,h,kind=installer_assets.select_update_asset(m,'https://github.com/combatengineer88/BusinessDesk/releases/download/'); assert kind=='setup'; print('Release uses Windows Setup',v)"
       - name: Upload update artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -90,6 +143,8 @@ jobs:
             TDZIGNS_BusinessDesk_v2.7_Automated_Windows_Build/TDZIGNS_BusinessDesk_*.zip
             TDZIGNS_BusinessDesk_v2.7_Automated_Windows_Build/TDZIGNS_BusinessDesk_*.sha256
             TDZIGNS_BusinessDesk_v2.7_Automated_Windows_Build/update_manifest.json
+            TDZIGNS_BusinessDesk_v2.7_Automated_Windows_Build/output/TDZIGNS_BusinessDesk_Setup_*.exe
+            TDZIGNS_BusinessDesk_v2.7_Automated_Windows_Build/output/TDZIGNS_BusinessDesk_Setup_*.sha256
           if-no-files-found: error
       - name: Publish GitHub release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -98,4 +153,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $version=(Select-String -Path 'businessdesk.py' -Pattern "^VERSION = '([0-9.]+)'").Matches.Groups[1].Value
-          gh release create '${{ github.ref_name }}' "TDZIGNS_BusinessDesk_$version.zip" "TDZIGNS_BusinessDesk_$version.sha256" update_manifest.json --title "BusinessDesk v$version" --generate-notes --latest
+          gh release create '${{ github.ref_name }}' "TDZIGNS_BusinessDesk_$version.zip" "TDZIGNS_BusinessDesk_$version.sha256" "output/TDZIGNS_BusinessDesk_Setup_$version.exe" "output/TDZIGNS_BusinessDesk_Setup_$version.sha256" update_manifest.json --title "BusinessDesk v$version" --generate-notes --latest

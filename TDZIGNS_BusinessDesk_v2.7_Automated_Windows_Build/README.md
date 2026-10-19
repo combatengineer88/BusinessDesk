@@ -266,3 +266,39 @@ See `UPDATE_RESTART_FIX_README.txt`. The update handoff now waits until the Wind
 **Built-in updater change:** If an EXE was launched from `%TEMP%` or an Explorer `.zip.*` extraction folder, GitHub Update now redirects installation to the permanent per-user location, creates shortcuts, and restarts from there. A normal installed EXE continues to update in place. The updater helper also refuses temporary targets as a guardrail. CI includes path-selection tests and PowerShell syntax validation.
 
 The archive contains SOURCE CODE: publish it to GitHub, trigger a tagged Windows build (`v2.9.5`), and use the resulting installable GitHub Release ZIP. The one-time kit can install already-published v2.9.4 without waiting for v2.9.5. Test with a database backup. Full Windows E2E installation has not been executed here.
+
+---
+
+## v2.9.7 — Windows Setup installer (recommended)
+
+**New release format:** `TDZIGNS_BusinessDesk_Setup_2.9.7.exe` is a standard Windows Setup wizard built with Inno Setup 6. It is a **Setup EXE, not an MSI package**. It installs the complete ONEDIR PyInstaller application and the `_internal` runtime folder, registers an uninstall entry in Windows **Settings → Apps → Installed apps**, creates a Start Menu shortcut, and optionally creates a desktop shortcut. No separate Python installation is required on the user's Windows computer.
+
+**Installation path:** `%LOCALAPPDATA%\Programs\TDZIGNS BusinessDesk\TDZIGNS_BusinessDesk.exe`.
+
+**Business records:** `%LOCALAPPDATA%\BusinessDesk\business.db` and other company data remain outside the application installation folder. Reinstalling, upgrading, and uninstalling BusinessDesk do **not** intentionally delete these data files. Back them up before every upgrade.
+
+### First install / repair
+
+1. Commit this v2.9.7 source release, including `.github/workflows/windows-release.yml` at the repository root and the new `businessdesk.iss`, `installer_assets.py`, `installer_update.ps1`, and `package_setup.py` inside the application folder.
+2. Tag `v2.9.7` and push the tag. The Windows GitHub Actions workflow builds the ONEDIR application, runs startup and installer smoke tests, produces both update ZIP and Setup EXE, and attaches both to GitHub Releases. The compiled installer is not included in this source ZIP.
+3. Download `TDZIGNS_BusinessDesk_Setup_2.9.7.exe` from https://github.com/combatengineer88/BusinessDesk/releases/tag/v2.9.7 **once the workflow succeeds**.
+4. Close any running BusinessDesk processes and double-click Setup EXE. Select a desktop icon if desired.
+5. Launch BusinessDesk from the Start Menu or desktop shortcut. **Do not run the EXE from inside a ZIP.**
+
+### Subsequent GitHub updates
+
+The GitHub manifest now contains `installer_url` and `installer_sha256` in addition to the legacy ZIP URL and hash. BusinessDesk v2.9.7+ checks GitHub Releases for a newer version and **prefers the standard Windows Setup installer**. After confirming the update, it downloads the Setup EXE, verifies its SHA-256 checksum, backs up the live SQLite database using SQLite's backup API, waits for the original app to exit, silently runs Setup, and launches the updated BusinessDesk. It waits for startup confirmation and writes logs under `%LOCALAPPDATA%\BusinessDesk\updates`.
+
+Earlier BusinessDesk versions do not understand installer-specific fields, so **use the Setup EXE manually for the first transition to v2.9.7** if your current updater is unreliable. Legacy release ZIP packaging remains supported for compatibility.
+
+### GitHub repository layout
+
+- `.github/workflows/windows-release.yml` — repository root workflow
+- `TDZIGNS_BusinessDesk_v2.7_Automated_Windows_Build/businessdesk.iss` — Inno Setup project
+- `TDZIGNS_BusinessDesk_v2.7_Automated_Windows_Build/installer_update.ps1` — restart/update helper
+- `TDZIGNS_BusinessDesk_v2.7_Automated_Windows_Build/package_setup.py` — publish Setup hash and manifest
+- `TDZIGNS_BusinessDesk_v2.7_Automated_Windows_Build/installer_assets.py` — validate release URLs and installers
+
+### Security and testing
+
+The app uses the same Windows user permissions as the current account. GitHub CI verifies the EXE and DLLs are packaged and tests an installed copy on a Windows runner, but this workflow has **not yet run** for v2.9.7. Windows SmartScreen may warn about **unsigned** executables. For broad distribution, obtain an Authenticode signing certificate and sign the installer and application before publishing releases. SHA-256 helps detect file changes but is not a substitute for signed code. The updater retains detailed logs and a backup of the previous program folder if an update fails; manual recovery may be required. The installer does not automatically restore a previous version if a new executable fails after installation.
