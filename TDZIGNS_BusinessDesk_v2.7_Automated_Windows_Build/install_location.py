@@ -27,8 +27,12 @@ def is_temporary_install(executable, temp_root):
 
 
 def choose_install_target(executable, local_app_data, temp_root):
-    """Always keep true installations in place; move ZIP/temp copies to stable path."""
+    """BusinessDesk installs to a predictable per-user folder, including migration from old installs.
+
+    The second return value indicates whether the launcher must create/migrate shortcuts.
+    """
     current = PureWindowsPath(str(executable))
     stable = PureWindowsPath(str(local_app_data)) / 'Programs' / 'TDZIGNS BusinessDesk' / EXE_NAME
-    temporary = is_temporary_install(current, temp_root)
-    return (str(stable) if temporary else str(current)), temporary
+    if current.name.casefold() != EXE_NAME.casefold():
+        raise ValueError('Unexpected BusinessDesk executable name')
+    return str(stable), _parts(current) != _parts(stable)

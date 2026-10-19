@@ -1,51 +1,45 @@
-# Offline update installer for TDZIGNS BusinessDesk. Run after closing the app.
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.IO.Compression.FileSystem
+# Offline ONEDIR release installer for BusinessDesk 2.9.6 and later.
+# Select the complete compiled ZIP, not the source ZIP and not an EXE alone.
 $ErrorActionPreference='Stop'
+Add-Type -AssemblyName System.Windows.Forms
+$DataDir=Join-Path $env:LOCALAPPDATA 'BusinessDesk'
+$Updates=Join-Path $DataDir 'updates'
+$Target=Join-Path $env:LOCALAPPDATA 'Programs\TDZIGNS BusinessDesk\TDZIGNS_BusinessDesk.exe'
+New-Item -ItemType Directory -Path $Updates -Force | Out-Null
 try {
-  $folder=New-Object System.Windows.Forms.FolderBrowserDialog
-  $folder.Description='Select folder containing your downloaded ZIP or EXE update'
-  if ($folder.ShowDialog() -ne 'OK') { exit }
-  $file=New-Object System.Windows.Forms.OpenFileDialog
-  $file.InitialDirectory=$folder.SelectedPath
-  $file.Filter='BusinessDesk updates (*.zip;*.exe)|*.zip;*.exe'
-  if ($file.ShowDialog() -ne 'OK') { exit }
-  $package=$file.FileName
-  if ([IO.Path]::GetExtension($package) -ieq '.zip') {
-    $archive=[System.IO.Compression.ZipFile]::OpenRead($package)
-    try {
-      $entries=@($archive.Entries | Where-Object {$_.Name -ne ''})
-      if ($entries.Count -ne 1 -or $entries[0].FullName -ne 'TDZIGNS_BusinessDesk.exe') {throw 'Not an installable Windows ZIP. Build the EXE first.'}
-    } finally {$archive.Dispose()}
-  } elseif ([IO.Path]::GetExtension($package) -ine '.exe') {throw 'Select a ZIP or EXE.'}
-  $version='local'
-  $targetPicker=New-Object System.Windows.Forms.OpenFileDialog
-  $targetPicker.Title='Select your currently installed TDZIGNS_BusinessDesk.exe'
-  $targetPicker.Filter='TDZIGNS executable (TDZIGNS_BusinessDesk.exe)|TDZIGNS_BusinessDesk.exe'
-  if ($targetPicker.ShowDialog() -ne 'OK') { exit }
-  $target=$targetPicker.FileName
-  if ([IO.Path]::GetFullPath($package) -eq [IO.Path]::GetFullPath($target)) {throw 'The selected update and installed executable cannot be the same file.'}
-  if ((Get-Process -Name 'TDZIGNS_BusinessDesk' -ErrorAction SilentlyContinue)) {throw 'Close BusinessDesk before installing a local update.'}
-  $hash=(Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant()
-  $checksum=[IO.Path]::ChangeExtension($package,'.sha256')
-  if (Test-Path $checksum) {
-    $expected=((Get-Content -LiteralPath $checksum -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
-    if ($expected -ne $hash) {throw 'Checksum mismatch. Update rejected.'}
+  if (@(Get-Process -Name 'TDZIGNS_BusinessDesk' -ErrorAction SilentlyContinue).Count -gt 0) {
+    throw 'Close BusinessDesk completely before installing a local update.'
+  }
+  $picker=New-Object System.Windows.Forms.OpenFileDialog
+  $picker.Title='Select compiled BusinessDesk v2.9.6+ update ZIP (not source ZIP)'
+  $picker.Filter='BusinessDesk Windows release ZIP (*.zip)|*.zip'
+  if ($picker.ShowDialog() -ne 'OK') {exit 0}
+  $Package=$picker.FileName
+  if ((Get-Item -LiteralPath $Package).Length -gt 300MB) {throw 'Release archive is too large.'}
+  $match=[regex]::Match([IO.Path]::GetFileName($Package),'^TDZIGNS_BusinessDesk_(\d+\.\d+\.\d+)\.zip$')
+  if (-not $match.Success) {throw 'Expected a compiled release ZIP named TDZIGNS_BusinessDesk_X.Y.Z.zip.'}
+  $Version=$match.Groups[1].Value
+  if ([version]$Version -lt [version]'2.9.6') {throw 'This installer supports the ONEDIR format introduced with v2.9.6.'}
+  $Hash=(Get-FileHash -LiteralPath $Package -Algorithm SHA256).Hash.ToLowerInvariant()
+  $checksum=[IO.Path]::ChangeExtension($Package,'.sha256')
+  if (Test-Path -LiteralPath $checksum) {
+    $expected=((Get-Content -LiteralPath $checksum -Raw).Trim() -split '\s+')[0]
+    if ($expected -ine $Hash) {throw 'Downloaded release ZIP does not match its SHA-256 file.'}
   } else {
-    $confirm=[System.Windows.Forms.MessageBox]::Show('No .sha256 file found. Install only from a trusted source. Continue?','Unverified update','YesNo','Warning')
-    if ($confirm -ne 'Yes') {exit}
+    $answer=[Windows.Forms.MessageBox]::Show('No SHA-256 checksum file was found beside the ZIP. Only install a trusted GitHub Release download. Continue?',
+      'Unverified local release','YesNo','Warning')
+    if ($answer -ne 'Yes') {exit 0}
   }
-  $dataDir=Join-Path $env:LOCALAPPDATA 'BusinessDesk'
-  $backup=Join-Path $dataDir ('updates\offline_backup_'+(Get-Date -Format 'yyyyMMdd_HHmmss'))
+  $backup=Join-Path $Updates ('data_backup_before_offline_'+(Get-Date -Format 'yyyyMMdd_HHmmss'))
   New-Item -ItemType Directory -Path $backup -Force | Out-Null
-  foreach($name in @('business.db','business.db-wal','business.db-shm')){
-    $src=Join-Path $dataDir $name
-    if(Test-Path $src){Copy-Item -LiteralPath $src -Destination $backup -Force}
+  foreach ($file in @('business.db','business.db-wal','business.db-shm')) {
+    $src=Join-Path $DataDir $file
+    if (Test-Path -LiteralPath $src) {Copy-Item -LiteralPath $src -Destination $backup -Force}
   }
-  & (Join-Path $PSScriptRoot 'update_installer.ps1') -Package $package -Target $target -ProcessIdToWait 0 -DataDir $dataDir -ExpectedSha256 $hash
-  if ($LASTEXITCODE -ne 0) {throw 'Update did not finish. See installation.log under %LOCALAPPDATA%\BusinessDesk\updates.'}
-  [System.Windows.Forms.MessageBox]::Show("Update installed at: $target. BusinessDesk was restarted.",'TDZIGNS BusinessDesk') | Out-Null
+  & (Join-Path $PSScriptRoot 'update_installer.ps1') -Package $Package -Target $Target -ProcessIdToWait 0 -DataDir $DataDir -ExpectedSha256 $Hash -Version $Version -AllowFreshInstall -CreateShortcuts
+  if ($LASTEXITCODE -ne 0) {throw 'The updater failed. Check installation.log in your BusinessDesk updates folder.'}
+  [Windows.Forms.MessageBox]::Show('BusinessDesk has restarted successfully.'+"`r`n"+'Location: '+$Target,'BusinessDesk update') | Out-Null
 } catch {
-  [System.Windows.Forms.MessageBox]::Show($_.Exception.Message,'Update failed') | Out-Null
+  [Windows.Forms.MessageBox]::Show($_.Exception.Message+"`r`n`r`n"+'Log: '+(Join-Path $Updates 'installation.log'),'BusinessDesk update failed','OK','Error') | Out-Null
   exit 1
 }

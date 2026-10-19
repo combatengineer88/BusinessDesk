@@ -1,5 +1,5 @@
-# TDZIGNS BusinessDesk v2.9.4 standalone updater.
-# Runs in a separate PowerShell process after the main application exits.
+# BusinessDesk v2.9.6 ONEDIR updater. PowerShell 5.1 compatible.
+# This installer intentionally runs OUTSIDE the application process.
 param(
   [Parameter(Mandatory=$true)][string]$Package,
   [Parameter(Mandatory=$true)][string]$Target,
@@ -13,239 +13,205 @@ param(
   [string]$AttemptId = '',
   [switch]$PrepareOnly
 )
-$ErrorActionPreference = 'Stop'
-$updates = Join-Path $DataDir 'updates'
+$ErrorActionPreference='Stop'
+$updates=Join-Path $DataDir 'updates'
 New-Item -ItemType Directory -Path $updates -Force | Out-Null
-$log = Join-Path $updates 'installation.log'
-$statusFile = Join-Path $updates 'install_status.json'
-$backupDir = Join-Path $updates ('backup_' + (Get-Date -Format 'yyyyMMdd_HHmmss') + '_' + [guid]::NewGuid().ToString('N').Substring(0,6))
-$backupExe = Join-Path $backupDir 'TDZIGNS_BusinessDesk.exe'
-$stage = Join-Path $updates ('unpack_' + [guid]::NewGuid().ToString('N'))
-$readyFile = Join-Path $updates ('ready_' + [guid]::NewGuid().ToString('N') + '.json')
-$replacementAttempted = $false
-$hadPrevious = $false
-$launch = $null
-$failure = $null
+$log=Join-Path $updates 'installation.log'
+$statusFile=Join-Path $updates 'install_status.json'
+$targetDir=''
+$stage=''
+$previousDir=''
+$smokeData=''
+$readyFile=Join-Path $updates ('ready_'+[guid]::NewGuid().ToString('N')+'.json')
+$installed=$false
+$oldMoved=$false
+$started=$null
+$failure=$null
 
-function Write-Log([string]$text) {
-  Add-Content -LiteralPath $log -Encoding UTF8 -Value ('[' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + '] ' + $text)
+function Write-Log([string]$message) {
+  Add-Content -LiteralPath $log -Encoding UTF8 -Value ('['+(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')+'] '+$message)
 }
-function Write-Status([string]$state, [string]$detail) {
-  $report = @{
-    status = $state
-    message = $detail
-    version = $Version
-    target = $Target
-    package = $Package
-    attempt_id = $AttemptId
-    backup = $(if (Test-Path -LiteralPath $backupExe) { $backupExe } else { '' })
-    updated_at = (Get-Date).ToString('s')
-    log = $log
-  }
-  $report | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $statusFile -Encoding UTF8
-  Write-Log ($state + ': ' + $detail)
+function Write-Status([string]$state,[string]$message) {
+  $status=@{status=$state;message=$message;version=$Version;target=$Target;package=$Package;
+    attempt_id=$AttemptId;log=$log;backup=$previousDir;updated_at=(Get-Date).ToString('s')}
+  $status | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $statusFile -Encoding UTF8
+  Write-Log ($state+': '+$message)
 }
-function Show-Error([string]$detail) {
+function Show-Failure([string]$message) {
   try {
     Add-Type -AssemblyName System.Windows.Forms
-    $form = New-Object System.Windows.Forms.Form
-    $form.TopMost = $true
-    $form.ShowInTaskbar = $false
-    [System.Windows.Forms.MessageBox]::Show($form, $detail, 'BusinessDesk update did not finish', 'OK', 'Error') | Out-Null
-    $form.Dispose()
-  } catch { Write-Log ('Could not show error dialog: ' + $_.Exception.Message) }
+    [System.Windows.Forms.MessageBox]::Show($message,'BusinessDesk update failed','OK','Error') | Out-Null
+  } catch { Write-Log ('Could not show error message: '+$_.Exception.Message) }
 }
-function Copy-WithRetry([string]$from, [string]$to) {
-  $lastError = ''
-  for ($attempt = 1; $attempt -le 12; $attempt++) {
-    try {
-      Copy-Item -LiteralPath $from -Destination $to -Force -ErrorAction Stop
-      return
-    } catch {
-      $lastError = $_.Exception.Message
-      Start-Sleep -Seconds 1
+function Ensure-Zip-Safe([string]$zip,[string]$outDir) {
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  $archive=[IO.Compression.ZipFile]::OpenRead($zip)
+  try {
+    $entries=@($archive.Entries | Where-Object {$_.Name -ne ''})
+    if ($entries.Count -lt 3 -or $entries.Count -gt 12000) {throw 'Unexpected update file count.'}
+    $names=@($entries | ForEach-Object {$_.FullName.Replace('\','/')})
+    if (-not ($names -ccontains 'TDZIGNS_BusinessDesk.exe')) {throw 'Update missing TDZIGNS_BusinessDesk.exe.'}
+    if (-not ($names -ccontains '_internal/python312.dll')) {throw 'Update missing _internal/python312.dll. Download the entire v2.9.6+ GitHub release ZIP.'}
+    $total=[int64]0
+    $seen=@{}
+    $root=[IO.Path]::GetFullPath($outDir).TrimEnd('\')+'\'
+    foreach ($entry in $entries) {
+      $name=$entry.FullName.Replace('\','/')
+      if (-not ($name -ceq 'TDZIGNS_BusinessDesk.exe' -or $name.StartsWith('_internal/')) -or
+          $name.StartsWith('/') -or $name.Contains('\') -or
+          $name -match '(^|/)\.\.(/|$)' -or $name.Contains(':')) {
+        throw ('Unsafe path in update ZIP: '+$name)
+      }
+      if ($seen.ContainsKey($name.ToLowerInvariant())) {throw ('Duplicate ZIP entry: '+$name)}
+      $seen[$name.ToLowerInvariant()]=$true
+      $total += [int64]$entry.Length
+      if ($total -gt 1000000000) {throw 'Update would extract more than 1GB.'}
+      $absolute=[IO.Path]::GetFullPath((Join-Path $outDir $name.Replace('/','\')))
+      if (-not $absolute.StartsWith($root,[StringComparison]::OrdinalIgnoreCase)) {
+        throw ('Unsafe extraction destination: '+$name)
+      }
     }
+    if (($archive.GetEntry('TDZIGNS_BusinessDesk.exe')).Length -lt 100000) {throw 'Invalid Windows executable size.'}
+    foreach ($entry in $entries) {
+      $output=Join-Path $outDir $entry.FullName.Replace('/','\')
+      $folder=Split-Path -Parent $output
+      if (-not (Test-Path -LiteralPath $folder)) {New-Item -Path $folder -ItemType Directory -Force | Out-Null}
+      [IO.Compression.ZipFileExtensions]::ExtractToFile($entry,$output,$false)
+    }
+  } finally { $archive.Dispose() }
+}
+function Make-Shortcuts([string]$exe) {
+  $wsh=New-Object -ComObject WScript.Shell
+  foreach ($folder in @([Environment]::GetFolderPath('Desktop'),[Environment]::GetFolderPath('Programs'))) {
+    if (-not $folder) {continue}
+    if (-not (Test-Path -LiteralPath $folder)) {New-Item -ItemType Directory -Path $folder -Force | Out-Null}
+    $link=$wsh.CreateShortcut((Join-Path $folder 'TDZIGNS BusinessDesk.lnk'))
+    $link.TargetPath=$exe
+    $link.WorkingDirectory=Split-Path -Parent $exe
+    $link.IconLocation=$exe+',0'
+    $link.Save()
   }
-  throw ('Could not replace executable at ' + $to + '. ' + $lastError + '. Check installation folder permissions or antivirus locks.')
 }
 
 try {
-  $Package = [IO.Path]::GetFullPath($Package)
-  $Target = [IO.Path]::GetFullPath($Target)
-  if ([IO.Path]::GetFileName($Target) -ine 'TDZIGNS_BusinessDesk.exe') {
-    throw 'Unexpected installed executable name. The target must be TDZIGNS_BusinessDesk.exe.'
-  }
-  $tempDirectory = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
-  if ($Target.StartsWith($tempDirectory,[System.StringComparison]::OrdinalIgnoreCase) -or
-      $Target -match '\.zip\.[^\\]+\\TDZIGNS_BusinessDesk\.exe$') {
-    throw ('Refusing to install into a temporary ZIP extraction folder: ' + $Target + '. Reopen from the permanent installation or use the supplied permanent-install recovery kit.')
-  }
-  $hadPrevious = Test-Path -LiteralPath $Target -PathType Leaf
-  if (-not $hadPrevious -and -not $AllowFreshInstall) {
-    throw ('The installed executable was not found at: ' + $Target)
-  }
-  if (-not $hadPrevious) {
-    New-Item -ItemType Directory -Path (Split-Path -Parent $Target) -Force | Out-Null
-  }
-  if (-not (Test-Path -LiteralPath $Package -PathType Leaf)) {
-    throw ('The downloaded update file is missing: ' + $Package)
-  }
-  if ($Package -ieq $Target) { throw 'The update package and installed executable cannot be the same file.' }
-  if ($ExpectedSha256 -notmatch '^[a-fA-F0-9]{64}$') { throw 'Invalid expected SHA-256 hash.' }
-  Write-Status 'verifying' ('Installing into: ' + $Target)
-  $actual = (Get-FileHash -LiteralPath $Package -Algorithm SHA256).Hash
-  if ($actual -ine $ExpectedSha256) { throw 'Update SHA-256 checksum does not match; no application files were changed.' }
-
+  Write-Log 'Starting BusinessDesk ONEDIR update helper.'
+  $Package=[IO.Path]::GetFullPath($Package)
+  $Target=[IO.Path]::GetFullPath($Target)
+  $canonical=[IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'Programs\TDZIGNS BusinessDesk\TDZIGNS_BusinessDesk.exe'))
+  if ($Target -ine $canonical) {throw ('Refusing unexpected target location: '+$Target+'. Expected: '+$canonical)}
+  $targetDir=Split-Path -Parent $Target
+  $parentDir=Split-Path -Parent $targetDir
+  $basename=Split-Path -Leaf $targetDir
+  if ($Package -eq $Target) {throw 'Package is the installed executable.'}
+  if (-not (Test-Path -LiteralPath $Package -PathType Leaf)) {throw ('Update ZIP missing: '+$Package)}
+  if ([IO.Path]::GetExtension($Package) -ine '.zip') {throw 'BusinessDesk v2.9.6+ requires a full update ZIP, not a single EXE.'}
+  if ($ExpectedSha256 -notmatch '^[A-Fa-f0-9]{64}$') {throw 'Invalid SHA-256 digest.'}
+  Write-Status 'verifying' ('Checking update ZIP; target '+$Target)
+  $actual=(Get-FileHash -LiteralPath $Package -Algorithm SHA256).Hash
+  if ($actual -ine $ExpectedSha256) {throw 'Update ZIP SHA-256 hash mismatch. Installation stopped.'}
+  New-Item -ItemType Directory -Path $parentDir -Force | Out-Null
+  $stage=Join-Path $parentDir ($basename+'.stage_'+[guid]::NewGuid().ToString('N'))
   New-Item -ItemType Directory -Path $stage -Force | Out-Null
-  if ([IO.Path]::GetExtension($Package) -ieq '.zip') {
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $archive = [IO.Compression.ZipFile]::OpenRead($Package)
-    try {
-      $entries = @($archive.Entries | Where-Object { $_.Name -ne '' })
-      if ($entries.Count -ne 1 -or $entries[0].FullName -cne 'TDZIGNS_BusinessDesk.exe') {
-        throw 'Invalid Windows update ZIP: it must contain only TDZIGNS_BusinessDesk.exe at its root.'
-      }
-      if ($entries[0].Length -lt 100000 -or $entries[0].Length -gt 400MB) {
-        throw 'Update executable has an invalid size.'
-      }
-      $exeOut = Join-Path $stage 'TDZIGNS_BusinessDesk.exe'
-      [IO.Compression.ZipFileExtensions]::ExtractToFile($entries[0], $exeOut, $false)
-    } finally { $archive.Dispose() }
-  } elseif ([IO.Path]::GetExtension($Package) -ieq '.exe') {
-    $exeOut = $Package
-  } else { throw 'Please choose a compiled Windows EXE or Windows update ZIP.' }
+  Ensure-Zip-Safe $Package $stage
+  $candidate=Join-Path $stage 'TDZIGNS_BusinessDesk.exe'
+  if (-not (Test-Path -LiteralPath $candidate)) {throw 'Prepared EXE not found.'}
+  if (-not (Test-Path -LiteralPath (Join-Path $stage '_internal\python312.dll'))) {throw 'Missing Python runtime DLL after extraction.'}
 
-  $exeStream = [IO.File]::OpenRead($exeOut)
+  # Test all imports and DLL loading *before* shutting down the old application.
+  # Use an isolated smoke-test LOCALAPPDATA so production database is untouched.
+  $smokeData=Join-Path $updates ('smoke_'+[guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Path $smokeData -Force | Out-Null
+  $previousLocal=$env:LOCALAPPDATA
   try {
-    if ($exeStream.ReadByte() -ne 77 -or $exeStream.ReadByte() -ne 90) { throw 'The update is not a valid Windows executable.' }
-    if ($exeStream.Length -lt 100000) { throw 'Update executable is unexpectedly small.' }
-  } finally { $exeStream.Dispose() }
-
-  Write-Status 'prepared' ('Verified Windows update; installation location: ' + $Target)
+    $env:LOCALAPPDATA=$smokeData
+    $probe=Start-Process -FilePath $candidate -ArgumentList '--smoke-test' -WorkingDirectory $stage -PassThru -ErrorAction Stop
+    $finished=$probe.WaitForExit(45000)
+    if (-not $finished) {
+      try { & taskkill.exe /PID $probe.Id /T /F 2>$null | Out-Null } catch {}
+      throw 'Runtime smoke test timed out. A DLL loading error dialog or security software may be blocking startup.'
+    }
+    if ($probe.ExitCode -ne 0) {throw ('Runtime smoke test failed with exit code '+$probe.ExitCode+'. Check Windows runtime dependencies, antivirus quarantine, or application packaging.')}
+  } finally { $env:LOCALAPPDATA=$previousLocal }
+  Write-Status 'prepared' 'Verified update ZIP and Python DLL; smoke test passed.'
   if ($HandoffFile) {
     $handoffFull=[IO.Path]::GetFullPath($HandoffFile)
     $updatesFull=[IO.Path]::GetFullPath($updates)
     if ([IO.Path]::GetDirectoryName($handoffFull) -ine $updatesFull -or
         [IO.Path]::GetFileName($handoffFull) -notmatch '^handoff_[0-9a-f]{32}\.ready$') {
-      throw 'Refusing an unsafe updater handoff path.'
+      throw 'Unexpected update handoff path.'
     }
-    [IO.File]::WriteAllText($handoffFull, 'PREPARED', [Text.UTF8Encoding]::new($false))
-    Write-Log 'Handoff acknowledged; waiting for the old application to exit.'
+    [IO.File]::WriteAllText($handoffFull,'PREPARED',[Text.UTF8Encoding]::new($false))
+    Write-Log 'Handoff acknowledged; awaiting application shutdown.'
   }
-  # Used by CI to verify the release package, helper invocation, and handoff
-  # without changing a production executable or launching the GUI.
-  if ($PrepareOnly) {
-    Write-Status 'preflight_success' 'Update package verified and installation handoff acknowledged.'
-    return
-  }
+  if ($PrepareOnly) {Write-Status 'preflight_success' 'ZIP and Python runtime validated; no files changed.';return}
   if ($ProcessIdToWait -gt 0) {
-    $running = Get-Process -Id $ProcessIdToWait -ErrorAction SilentlyContinue
-    if ($running) {
-      Write-Status 'waiting' 'Waiting for BusinessDesk to close before replacing the EXE.'
-      $running.WaitForExit(90000) | Out-Null
-      if (-not $running.HasExited) { throw 'The original BusinessDesk process did not exit within 90 seconds.' }
+    $old=Get-Process -Id $ProcessIdToWait -ErrorAction SilentlyContinue
+    if ($old) {
+      Write-Status 'waiting' 'Waiting for existing BusinessDesk process to exit.'
+      if (-not $old.WaitForExit(90000)) {throw 'Existing BusinessDesk process did not close within 90 seconds.'}
     }
   }
-
-  New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
-  if ($hadPrevious) {
-    Copy-Item -LiteralPath $Target -Destination $backupExe -Force -ErrorAction Stop
-    Write-Status 'replacing' ('Original executable backed up to ' + $backupExe)
-  } else {
-    Write-Status 'installing' ('Fresh per-user installation at ' + $Target)
-  }
-  $replacementAttempted = $true
-  Copy-WithRetry $exeOut $Target
-  Write-Status 'restarting' ('Updated executable installed at ' + $Target + '; starting BusinessDesk...')
-
-  # A successful Start-Process does not prove the app opened. The new app writes
-  # this marker once the login window has been initialized by Tkinter.
-  $env:BUSINESSDESK_UPDATE_READY_FILE = $readyFile
+  # Backup whole installed folder to preserve EXE AND its runtime files.
+  $previousDir=Join-Path $parentDir ($basename+'.backup_'+(Get-Date -Format 'yyyyMMdd_HHmmss')+'_'+[guid]::NewGuid().ToString('N').Substring(0,6))
+  if (Test-Path -LiteralPath $targetDir) {
+    Write-Status 'backing_up' ('Moving previous application folder to '+$previousDir)
+    Move-Item -LiteralPath $targetDir -Destination $previousDir -ErrorAction Stop
+    $oldMoved=$true
+  } elseif (-not $AllowFreshInstall) {throw ('Application is not installed at '+$Target+'. Run the repair installer instead.')}
+  Write-Status 'installing' ('Installing app and Python DLLs to '+$targetDir)
+  Move-Item -LiteralPath $stage -Destination $targetDir -ErrorAction Stop
+  $stage=''
+  $installed=$true
+  $env:BUSINESSDESK_UPDATE_READY_FILE=$readyFile
   try {
-    $launch = Start-Process -FilePath $Target -WorkingDirectory (Split-Path -Parent $Target) -PassThru -ErrorAction Stop
-  } finally {
-    Remove-Item Env:BUSINESSDESK_UPDATE_READY_FILE -ErrorAction SilentlyContinue
-  }
-  $deadline = (Get-Date).AddSeconds(90)
-  $restartConfirmed = $false
-  $lastReason = 'The updated application did not confirm its startup.'
+    $started=Start-Process -FilePath $Target -WorkingDirectory $targetDir -PassThru -ErrorAction Stop
+  } finally {Remove-Item Env:BUSINESSDESK_UPDATE_READY_FILE -ErrorAction SilentlyContinue}
+  $deadline=(Get-Date).AddSeconds(90)
+  $ready=$false
   while ((Get-Date) -lt $deadline) {
-    Start-Sleep -Milliseconds 750
+    Start-Sleep -Milliseconds 650
     if (Test-Path -LiteralPath $readyFile) {
-      $ready = Get-Content -LiteralPath $readyFile -Raw | ConvertFrom-Json
-      if ([IO.Path]::GetFullPath($ready.exe) -ine $Target) {
-        throw ('Updated application started from an unexpected path: ' + $ready.exe)
-      }
-      if ($Version -and $ready.version -ne $Version) {
-        throw ('Restarted version mismatch: expected ' + $Version + ', got ' + $ready.version)
-      }
-      $restartConfirmed = $true
-      break
+      $marker=Get-Content -LiteralPath $readyFile -Raw | ConvertFrom-Json
+      if ([IO.Path]::GetFullPath([string]$marker.exe) -ine $Target) {throw 'New application started from the wrong location.'}
+      if ($Version -and [string]$marker.version -ne $Version) {throw ('Version mismatch. Started '+$marker.version+', expected '+$Version)}
+      $ready=$true;break
     }
-    if ($launch) {
-      $launch.Refresh()
-      if ($launch.HasExited) {
-        $lastReason = ('Updated application exited before becoming ready (exit code ' + $launch.ExitCode + ').')
-        break
-      }
-    }
+    $started.Refresh()
+    if ($started.HasExited) {throw ('New BusinessDesk exited before startup confirmation. Code: '+$started.ExitCode)}
   }
-  if (-not $restartConfirmed) { throw $lastReason }
-  if ($CreateShortcuts) {
-    try {
-      $shell=New-Object -ComObject WScript.Shell
-      $locations=@([Environment]::GetFolderPath('Desktop'),[Environment]::GetFolderPath('Programs'))
-      foreach ($folder in $locations) {
-        if (-not $folder) {continue}
-        if (-not (Test-Path -LiteralPath $folder)) {New-Item -ItemType Directory -Path $folder -Force | Out-Null}
-        $shortcut=$shell.CreateShortcut((Join-Path $folder 'TDZIGNS BusinessDesk.lnk'))
-        $shortcut.TargetPath=$Target
-        $shortcut.WorkingDirectory=Split-Path -Parent $Target
-        $shortcut.IconLocation=$Target+',0'
-        $shortcut.Save()
-      }
-      Write-Log ('Desktop and Start Menu shortcuts point to ' + $Target)
-    } catch {Write-Log ('Warning: application is running, but shortcut creation failed: ' + $_.Exception.Message)}
-  }
-  Write-Status 'success' ('Version ' + $Version + ' installed and reopened at ' + $Target)
+  if (-not $ready) {throw 'New BusinessDesk did not confirm successful startup within 90 seconds.'}
+  try { Make-Shortcuts $Target } catch { Write-Log ('Shortcut warning: '+$_.Exception.Message) }
+  Write-Status 'success' ('BusinessDesk '+$Version+' is running from '+$Target+'. Previous app at '+$previousDir)
 } catch {
-  $failure = $_.Exception.Message
+  $failure=$_.Exception.Message
   Write-Status 'failed' $failure
-  # Do not leave a failed new application running during rollback.
-  if ($replacementAttempted -and $hadPrevious -and (Test-Path -LiteralPath $backupExe)) {
+  if ($started) {
     try {
-      if ($launch) {
-        $launch.Refresh()
-        if (-not $launch.HasExited) {
-          # Force the PyInstaller one-file bootloader and its child to exit before rollback.
-          & taskkill.exe /PID $launch.Id /T /F 2>$null | Out-Null
-          $launch.WaitForExit(15000) | Out-Null
-        }
+      $started.Refresh()
+      if (-not $started.HasExited) {
+        & taskkill.exe /PID $started.Id /T /F 2>$null | Out-Null
+        $started.WaitForExit(10000) | Out-Null
       }
-      Copy-WithRetry $backupExe $Target
-      Write-Status 'rolled_back' ('Update failed: ' + $failure + '. Previous executable was restored at ' + $Target)
-      # A rollback uses the original build, which may not implement the startup marker.
-      Start-Process -FilePath $Target -WorkingDirectory (Split-Path -Parent $Target) -ErrorAction Stop | Out-Null
-    } catch {
-      Write-Status 'rollback_failed' ('Update failure: ' + $failure + '. Rollback error: ' + $_.Exception.Message)
-    }
-  } elseif ($replacementAttempted -and -not $hadPrevious) {
-    try {
-      if ($launch) {
-        $launch.Refresh()
-        if (-not $launch.HasExited) { & taskkill.exe /PID $launch.Id /T /F 2>$null | Out-Null }
-      }
-      Remove-Item -LiteralPath $Target -Force -ErrorAction Stop
-    } catch {Write-Log ('Fresh-install cleanup failed: ' + $_.Exception.Message)}
+    } catch { Write-Log ('Could not stop failed app: '+$_.Exception.Message) }
   }
-  Show-Error ('The BusinessDesk update could not be completed.' + "`r`n`r`n" + $failure + "`r`n`r`n" +
-    'Expected installation location:' + "`r`n" + $Target + "`r`n`r`n" +
-    'Update log:' + "`r`n" + $log + "`r`n" +
-    'Startup errors:' + "`r`n" + (Join-Path $updates 'startup_errors.log') + "`r`n`r`n" +
-    'The previous EXE was restored if possible. Your database was not removed.')
+  if ($oldMoved) {
+    try {
+      if (Test-Path -LiteralPath $targetDir) {
+        $failedDir=Join-Path (Split-Path -Parent $targetDir) ((Split-Path -Leaf $targetDir)+'.failed_'+[guid]::NewGuid().ToString('N').Substring(0,6))
+        Move-Item -LiteralPath $targetDir -Destination $failedDir -ErrorAction Stop
+      }
+      Move-Item -LiteralPath $previousDir -Destination $targetDir -ErrorAction Stop
+      Write-Status 'rolled_back' ('Restored old application folder after update error: '+$failure)
+      Start-Process -FilePath $Target -WorkingDirectory $targetDir -ErrorAction Stop | Out-Null
+    } catch { Write-Status 'rollback_failed' ($failure+'; rollback: '+$_.Exception.Message) }
+  } elseif ($installed) {
+    Write-Log ('Fresh installation failed; candidate remains at '+$targetDir+' for diagnosis.')
+  }
+  if (-not $PrepareOnly) { Show-Failure ($failure+"`r`n`r`n"+'Installation log: '+$log+"`r`n"+'Previous installed folder: '+$previousDir) }
 } finally {
-  Remove-Item -LiteralPath $readyFile -Force -ErrorAction SilentlyContinue
-  Remove-Item -LiteralPath $stage -Force -Recurse -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $readyFile -ErrorAction SilentlyContinue
+  if ($stage -and (Test-Path -LiteralPath $stage)) {Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue}
+  if ($smokeData -and (Test-Path -LiteralPath $smokeData)) {Remove-Item -LiteralPath $smokeData -Recurse -Force -ErrorAction SilentlyContinue}
 }
-if ($failure) { exit 1 }
+if ($failure) {exit 1}
 exit 0

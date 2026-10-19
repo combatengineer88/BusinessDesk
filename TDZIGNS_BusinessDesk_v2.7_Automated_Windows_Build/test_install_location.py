@@ -16,9 +16,9 @@ class InstallLocationTests(unittest.TestCase):
         old=r'C:\Users\example\AppData\Local\Temp\one-off\TDZIGNS_BusinessDesk.exe'
         self.assertTrue(is_temporary_install(old,TEMP))
 
-    def test_preserves_permanent_custom_location(self):
+    def test_migrates_permanent_custom_location(self):
         old=r'D:\Tools\BusinessDesk\TDZIGNS_BusinessDesk.exe'
-        self.assertEqual(choose_install_target(old,LOCAL,TEMP),(old,False))
+        self.assertEqual(choose_install_target(old,LOCAL,TEMP),(STABLE,True))
 
     def test_preserves_standard_location(self):
         self.assertEqual(choose_install_target(STABLE,LOCAL,TEMP),(STABLE,False))

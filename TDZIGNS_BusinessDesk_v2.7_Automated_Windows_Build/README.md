@@ -1,3 +1,7 @@
+# BusinessDesk v2.9.6 — Reliable Windows installation and Python DLL fix
+
+See [REPAIR_296_README.md](REPAIR_296_README.md) for one-time recovery, GitHub publishing and testing instructions.
+
 # TDZIGNS LLC BusinessDesk v2.0
 
 Windows desktop business manager, offline by default. Includes v1 customer, employee, inventory, estimates, invoices, expenses, and reports, plus v2 enhancements.

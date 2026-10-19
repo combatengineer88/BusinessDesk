@@ -13,8 +13,9 @@ from sales_workflow import convert_estimate, record_invoice_payment
 from supplier_catalog import supplier_choices, products_for_supplier, create_supplier_po, validate_supplier_rows
 from update_support import read_status, signal_ready, STATUS_NAME
 from install_location import choose_install_target, is_temporary_install
+from release_layout import valid_release_names, inspect_release
 
-VERSION = '2.9.5'
+VERSION = '2.9.6'
 BUSINESS = 'TDZIGNS LLC'
 RELEASE_MANIFEST_URL = 'https://github.com/combatengineer88/BusinessDesk/releases/latest/download/update_manifest.json'
 TRUSTED_RELEASE_PREFIX = 'https://github.com/combatengineer88/BusinessDesk/releases/download/'
@@ -954,10 +955,10 @@ class BusinessDesk(BaseApp):
         self.button(p,'Open application folder',self.open_application_folder)
         self.button(p,'Open update log',self.open_update_log)
         self.button(p,'Check GitHub for updates',lambda:self.check_updates(url.get().strip() or RELEASE_MANIFEST_URL))
-        self.button(p,'Install local ZIP or EXE',self.choose_local_update)
+        self.button(p,'Install local GitHub update ZIP',self.choose_local_update)
         self.button(p,'Select update folder',self.choose_update_folder)
 
-        ttk.Label(p,text='Click Check GitHub for updates to download and install the newest published release. An administrator must approve installation. The repository must publish a tagged GitHub Release with a compiled update ZIP and manifest. Local ZIP/EXE installation remains available.',wraplength=850).pack(anchor='w',pady=12)
+        ttk.Label(p,text='Check GitHub for the latest release and install its verified ZIP. BusinessDesk installs to your permanent per-user Programs folder and restarts automatically. Keep the EXE and _internal folder together.',wraplength=850).pack(anchor='w',pady=12)
     def open_application_folder(self):
         path=Path(sys.executable if getattr(sys,'frozen',False) else __file__).resolve().parent
         if sys.platform=='win32':os.startfile(str(path))
@@ -972,18 +973,18 @@ class BusinessDesk(BaseApp):
         else:messagebox.showinfo('Update diagnostics',str(log))
 
     def choose_update_folder(self):
-        folder=filedialog.askdirectory(title='Choose folder containing a Windows update ZIP or EXE')
+        folder=filedialog.askdirectory(title='Choose folder containing a Windows update ZIP')
         if not folder:return
-        packages=sorted(list(Path(folder).glob('*.zip'))+list(Path(folder).glob('*.exe')))
+        packages=sorted(list(Path(folder).glob('*.zip')))
         if not packages:
-            raise ValueError('No ZIP or EXE files were found in the selected directory.')
+            raise ValueError('No ZIP update packages were found in the selected directory.')
         selected=filedialog.askopenfilename(title='Select update package',initialdir=folder,
-            filetypes=[('Windows updates','*.zip *.exe')])
+            filetypes=[('Windows update ZIP','*.zip')])
         if selected:self.load_local_update(Path(selected))
 
     def choose_local_update(self):
         selected=filedialog.askopenfilename(title='Select Windows update package',
-            filetypes=[('Windows updates','*.zip *.exe')])
+            filetypes=[('Windows update ZIP','*.zip')])
         if selected:self.load_local_update(Path(selected))
 
     def load_local_update(self,package):
@@ -991,19 +992,18 @@ class BusinessDesk(BaseApp):
         if not package.is_file():raise FileNotFoundError('Selected update file does not exist.')
         if package.stat().st_size>200*1024*1024:raise ValueError('Update exceeds 200 MB.')
         if package.suffix.lower()=='.exe':
-            with package.open('rb') as handle:
-                if handle.read(2)!=b'MZ':raise ValueError('Selected file is not a Windows executable.')
-            if package.stat().st_size<100000:raise ValueError('Selected executable is unexpectedly small.')
+            raise ValueError('This release requires its _internal runtime folder. Select the complete GitHub update ZIP, not a standalone EXE.')
         elif package.suffix.lower()=='.zip':
             with zipfile.ZipFile(package) as archive:
                 names=[n for n in archive.namelist() if not n.endswith('/')]
-                if names!=['TDZIGNS_BusinessDesk.exe']:
+                inspect_release(package)
+                if not valid_release_names(names):
                     if any(n.endswith('.py') for n in names):
                         raise ValueError('This is a source-code ZIP, not an installable update. Build the Windows EXE first.')
-                    raise ValueError('Update ZIP must contain TDZIGNS_BusinessDesk.exe at its root.')
-                if archive.getinfo(names[0]).file_size<100000:
+                    raise ValueError('Update ZIP must contain the EXE and _internal Python runtime folder at its root.')
+                if archive.getinfo('TDZIGNS_BusinessDesk.exe').file_size<100000:
                     raise ValueError('Windows executable is unexpectedly small.')
-        else:raise ValueError('Choose a compiled Windows .exe or installable .zip file.')
+        else:raise ValueError('Choose the installable GitHub release .zip file.')
         match=re.search(r'(\d+\.\d+\.\d+)',package.stem)
         version=match.group(1) if match else 'unknown'
         if version!='unknown' and tuple(map(int,version.split('.')))<=tuple(map(int,VERSION.split('.'))):
@@ -1076,10 +1076,10 @@ class BusinessDesk(BaseApp):
             return
         target,temporary=choose_install_target(Path(sys.executable).resolve(),os.environ.get('LOCALAPPDATA',str(DATA.parent)),os.environ.get('TEMP',''))
         explanation=('BusinessDesk is running from a temporary ZIP location. It will be installed permanently, and desktop/Start Menu shortcuts will be created.'
-                     if temporary else 'The installed executable will be updated in place.')
+                     if temporary else 'The installed application folder will be updated and its previous version backed up.')
         if messagebox.askyesno('Install update',
             f'Install TDZIGNS BusinessDesk {version} now?\n\nInstallation location:\n{target}\n\n{explanation}\n\n'
-            'BusinessDesk will back up its database, close, install the verified EXE and restart.\nSave any other work first.'):
+            'BusinessDesk will back up its database, close, replace its application folder, and restart.\nSave any other work first.'):
             self.install_update(package,digest,version)
 
     def install_update(self,package,digest,version=''):
@@ -1091,19 +1091,19 @@ class BusinessDesk(BaseApp):
         install_target,migrating=choose_install_target(current_executable,os.environ.get('LOCALAPPDATA',str(DATA.parent)),os.environ.get('TEMP',''))
         executable=Path(install_target)
         if migrating:
-            # Do not write back into Explorer's temporary ZIP extraction folder.
+            # Always use per-user permanent installation folder, never temporary copies.
             executable.parent.mkdir(parents=True,exist_ok=True)
         if hashlib.sha256(Path(package).read_bytes()).hexdigest()!=digest:
             raise ValueError('Update checksum changed; installation cancelled.')
         if Path(package).suffix.lower()=='.zip':
             with zipfile.ZipFile(package) as z:
                 names=[n for n in z.namelist() if not n.endswith('/')]
-                if names!=['TDZIGNS_BusinessDesk.exe'] or z.getinfo(names[0]).file_size<100000:
-                    raise ValueError('Update ZIP must contain TDZIGNS_BusinessDesk.exe at its root.')
+                inspect_release(package)
+                if not valid_release_names(names) or z.getinfo('TDZIGNS_BusinessDesk.exe').file_size<100000:
+                    raise ValueError('Update ZIP must contain the EXE and _internal Python runtime folder at its root.')
         elif Path(package).suffix.lower()=='.exe':
-            with open(package,'rb') as handle:
-                if handle.read(2)!=b'MZ':raise ValueError('Not a valid Windows EXE.')
-        else:raise ValueError('Update must be .exe or .zip.')
+            raise ValueError('Select the GitHub release ZIP with the EXE and _internal runtime.')
+        else:raise ValueError('Update must be the GitHub release .zip.')
         updates=DATA/'updates';updates.mkdir(parents=True,exist_ok=True)
         backup=updates/('pre_update_'+datetime.now().strftime('%Y%m%d_%H%M%S')+'.db')
         with sqlite3.connect(str(backup)) as target:self.db.backup(target)
