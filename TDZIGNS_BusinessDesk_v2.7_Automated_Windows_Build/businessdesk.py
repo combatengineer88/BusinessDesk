@@ -12,8 +12,9 @@ from core_v1 import App as BaseApp, DB, DATA, cents, money
 from sales_workflow import convert_estimate, record_invoice_payment
 from supplier_catalog import supplier_choices, products_for_supplier, create_supplier_po, validate_supplier_rows
 from update_support import read_status, signal_ready, STATUS_NAME
+from install_location import choose_install_target, is_temporary_install
 
-VERSION = '2.9.4'
+VERSION = '2.9.5'
 BUSINESS = 'TDZIGNS LLC'
 RELEASE_MANIFEST_URL = 'https://github.com/combatengineer88/BusinessDesk/releases/latest/download/update_manifest.json'
 TRUSTED_RELEASE_PREFIX = 'https://github.com/combatengineer88/BusinessDesk/releases/download/'
@@ -939,6 +940,12 @@ class BusinessDesk(BaseApp):
         self.button(p,'Save update settings',save)
         installed=Path(sys.executable).resolve() if getattr(sys,'frozen',False) else Path(__file__).resolve()
         ttk.Label(p,text='Application location: '+str(installed),wraplength=900).pack(anchor='w',pady=5)
+        if getattr(sys,'frozen',False) and sys.platform=='win32':
+            install_target,is_temporary=choose_install_target(installed,os.environ.get('LOCALAPPDATA',str(DATA.parent)),os.environ.get('TEMP',''))
+            if is_temporary:
+                ttk.Label(p,text='WARNING: Running from a temporary ZIP folder. The next update will install BusinessDesk permanently at:\n'+install_target,
+                    foreground='#B45309',wraplength=900).pack(anchor='w',pady=7)
+
         last=read_status(DATA)
         if last:
             state=last.get('status','unknown')
@@ -1067,8 +1074,12 @@ class BusinessDesk(BaseApp):
         if self.user['role']!='admin':
             messagebox.showwarning('Administrator required','Sign in as an administrator to install updates.')
             return
+        target,temporary=choose_install_target(Path(sys.executable).resolve(),os.environ.get('LOCALAPPDATA',str(DATA.parent)),os.environ.get('TEMP',''))
+        explanation=('BusinessDesk is running from a temporary ZIP location. It will be installed permanently, and desktop/Start Menu shortcuts will be created.'
+                     if temporary else 'The installed executable will be updated in place.')
         if messagebox.askyesno('Install update',
-            f'Install TDZIGNS BusinessDesk {version} now?\n\nExisting installation location:\n{Path(sys.executable).resolve()}\n\nBusinessDesk will back up its database, close, replace the EXE, and restart. If it fails, an error will be displayed and logged.\nSave any other work first.'):
+            f'Install TDZIGNS BusinessDesk {version} now?\n\nInstallation location:\n{target}\n\n{explanation}\n\n'
+            'BusinessDesk will back up its database, close, install the verified EXE and restart.\nSave any other work first.'):
             self.install_update(package,digest,version)
 
     def install_update(self,package,digest,version=''):
@@ -1076,9 +1087,12 @@ class BusinessDesk(BaseApp):
             raise ValueError('Automatic installation is only supported from the packaged Windows EXE.')
         if self.user['role']!='admin':raise PermissionError('Administrator login required.')
         if getattr(self,'_updating',False):raise RuntimeError('An update is already being prepared.')
-        executable=Path(sys.executable).resolve()
-        if executable.name.lower()!='tdzigns_businessdesk.exe':
-            raise ValueError('Unexpected executable name; cannot safely replace it.')
+        current_executable=Path(sys.executable).resolve()
+        install_target,migrating=choose_install_target(current_executable,os.environ.get('LOCALAPPDATA',str(DATA.parent)),os.environ.get('TEMP',''))
+        executable=Path(install_target)
+        if migrating:
+            # Do not write back into Explorer's temporary ZIP extraction folder.
+            executable.parent.mkdir(parents=True,exist_ok=True)
         if hashlib.sha256(Path(package).read_bytes()).hexdigest()!=digest:
             raise ValueError('Update checksum changed; installation cancelled.')
         if Path(package).suffix.lower()=='.zip':
@@ -1105,6 +1119,9 @@ class BusinessDesk(BaseApp):
         args=['powershell.exe','-NoProfile','-NonInteractive','-STA','-ExecutionPolicy','Bypass',
               '-File',str(helper),'-Package',str(package),'-Target',str(executable),
               '-ProcessIdToWait',str(os.getpid()),'-DataDir',str(DATA),'-ExpectedSha256',digest,'-Version',str(version if re.fullmatch(r'\d+\.\d+\.\d+',str(version)) else '')]
+        if migrating:
+            args.append('-CreateShortcuts')
+            if not executable.exists():args.append('-AllowFreshInstall')
         # Keep this GUI running until the installer has VALIDATED and unpacked
         # the update. Previously, merely starting PowerShell closed the app,
         # even when that installer failed before doing any useful work.

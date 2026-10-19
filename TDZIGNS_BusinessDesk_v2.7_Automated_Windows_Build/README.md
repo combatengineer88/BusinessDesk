@@ -251,3 +251,14 @@ Example Excel headers and rows:
 ## v2.9.4 — Updater restart reliability
 
 See `UPDATE_RESTART_FIX_README.txt`. The update handoff now waits until the Windows installer has checked and unpacked the package before closing the GUI. Failed preparation leaves BusinessDesk open. PowerShell runs in a visible console. A manual restart launcher is saved under `%LOCALAPPDATA%\BusinessDesk\updates\Reopen BusinessDesk.cmd`. The GitHub workflow includes a Windows installer preparation regression test. The standalone recovery kit includes `reopen_existing.bat` for immediately locating and launching an existing installation and `repair_from_github.bat` for installing the latest compiled release after it is published.
+
+
+## v2.9.5: Fix updates from a temporary ZIP extraction folder
+
+**Cause found in the uploaded diagnostics:** the installed executable was actually running from a Windows Explorer ZIP extraction folder under `%LOCALAPPDATA%\Temp`. The previous updater replaced that transient EXE and could not establish a lasting installed program.
+
+**One-time recovery:** Extract `BusinessDesk_Permanent_Install_Kit.zip`, close all BusinessDesk processes, and run `Install_BusinessDesk_Permanently.bat`. It verifies the latest stable GitHub Release, reuses the already-downloaded ZIP only when its SHA-256 matches GitHub, preserves and backs up the existing database, and installs to `%LOCALAPPDATA%\Programs\TDZIGNS BusinessDesk\TDZIGNS_BusinessDesk.exe` with desktop/Start Menu shortcuts. The script does NOT install into `%TEMP%`. Read the included instructions and review the script before running it.
+
+**Built-in updater change:** If an EXE was launched from `%TEMP%` or an Explorer `.zip.*` extraction folder, GitHub Update now redirects installation to the permanent per-user location, creates shortcuts, and restarts from there. A normal installed EXE continues to update in place. The updater helper also refuses temporary targets as a guardrail. CI includes path-selection tests and PowerShell syntax validation.
+
+The archive contains SOURCE CODE: publish it to GitHub, trigger a tagged Windows build (`v2.9.5`), and use the resulting installable GitHub Release ZIP. The one-time kit can install already-published v2.9.4 without waiting for v2.9.5. Test with a database backup. Full Windows E2E installation has not been executed here.

@@ -8,6 +8,7 @@ param(
   [Parameter(Mandatory=$true)][string]$ExpectedSha256,
   [string]$Version = '',
   [switch]$AllowFreshInstall,
+  [switch]$CreateShortcuts,
   [string]$HandoffFile = '',
   [string]$AttemptId = '',
   [switch]$PrepareOnly
@@ -73,6 +74,11 @@ try {
   $Target = [IO.Path]::GetFullPath($Target)
   if ([IO.Path]::GetFileName($Target) -ine 'TDZIGNS_BusinessDesk.exe') {
     throw 'Unexpected installed executable name. The target must be TDZIGNS_BusinessDesk.exe.'
+  }
+  $tempDirectory = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+  if ($Target.StartsWith($tempDirectory,[System.StringComparison]::OrdinalIgnoreCase) -or
+      $Target -match '\.zip\.[^\\]+\\TDZIGNS_BusinessDesk\.exe$') {
+    throw ('Refusing to install into a temporary ZIP extraction folder: ' + $Target + '. Reopen from the permanent installation or use the supplied permanent-install recovery kit.')
   }
   $hadPrevious = Test-Path -LiteralPath $Target -PathType Leaf
   if (-not $hadPrevious -and -not $AllowFreshInstall) {
@@ -185,6 +191,22 @@ try {
     }
   }
   if (-not $restartConfirmed) { throw $lastReason }
+  if ($CreateShortcuts) {
+    try {
+      $shell=New-Object -ComObject WScript.Shell
+      $locations=@([Environment]::GetFolderPath('Desktop'),[Environment]::GetFolderPath('Programs'))
+      foreach ($folder in $locations) {
+        if (-not $folder) {continue}
+        if (-not (Test-Path -LiteralPath $folder)) {New-Item -ItemType Directory -Path $folder -Force | Out-Null}
+        $shortcut=$shell.CreateShortcut((Join-Path $folder 'TDZIGNS BusinessDesk.lnk'))
+        $shortcut.TargetPath=$Target
+        $shortcut.WorkingDirectory=Split-Path -Parent $Target
+        $shortcut.IconLocation=$Target+',0'
+        $shortcut.Save()
+      }
+      Write-Log ('Desktop and Start Menu shortcuts point to ' + $Target)
+    } catch {Write-Log ('Warning: application is running, but shortcut creation failed: ' + $_.Exception.Message)}
+  }
   Write-Status 'success' ('Version ' + $Version + ' installed and reopened at ' + $Target)
 } catch {
   $failure = $_.Exception.Message
