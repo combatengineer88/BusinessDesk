@@ -34,8 +34,9 @@ jobs:
       - name: Validate Python and PowerShell scripts
         shell: pwsh
         run: |
-          python -m py_compile businessdesk.py core_v1.py launcher.py package_release.py package_setup.py installer_assets.py release_layout.py document_templates.py template_editor.py
+          python -m py_compile businessdesk.py core_v1.py launcher.py package_release.py package_setup.py installer_assets.py release_layout.py document_templates.py template_editor.py visual_templates.py visual_template_editor.py modern_theme.py
           python test_document_templates.py
+          python test_visual_templates.py
           python test_installer_assets.py
           foreach ($script in @('update_installer.ps1','installer_update.ps1','install_local_update.ps1')) {
             $tokens=$null; $parseErrors=$null
@@ -51,10 +52,11 @@ jobs:
           python test_invoice_fix.py
           python test_release_layout.py
           python test_document_templates.py
+          python test_visual_templates.py
       - name: Build BusinessDesk ONEDIR application
         shell: pwsh
         run: |
-          python -m PyInstaller --noconfirm --clean --onedir --windowed --name TDZIGNS_BusinessDesk --collect-all reportlab --collect-all PIL --collect-all openpyxl --hidden-import excel_import --hidden-import supplier_catalog --hidden-import release_layout --hidden-import installer_assets --hidden-import document_templates --hidden-import template_editor --add-data "update_installer.ps1;." --add-data "installer_update.ps1;." launcher.py
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --name TDZIGNS_BusinessDesk --collect-all reportlab --collect-all PIL --collect-all openpyxl --hidden-import excel_import --hidden-import supplier_catalog --hidden-import release_layout --hidden-import installer_assets --hidden-import document_templates --hidden-import template_editor --hidden-import visual_templates --hidden-import visual_template_editor --hidden-import modern_theme --add-data "update_installer.ps1;." --add-data "installer_update.ps1;." launcher.py
           if (!(Test-Path 'dist/TDZIGNS_BusinessDesk/_internal/python312.dll')) {throw 'Built EXE missing python312.dll'}
           if (!(Test-Path 'dist/TDZIGNS_BusinessDesk/TDZIGNS_BusinessDesk.exe')) {throw 'Built EXE missing'}
           Get-ChildItem 'dist/TDZIGNS_BusinessDesk/_internal' -Filter 'vcruntime*.dll' | ForEach-Object {Write-Host "VC runtime: $($_.Name)"}

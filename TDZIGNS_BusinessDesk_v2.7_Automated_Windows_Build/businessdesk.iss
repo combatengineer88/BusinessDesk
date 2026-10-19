@@ -1,7 +1,7 @@
 ; TDZIGNS LLC BusinessDesk — per-user Windows Setup installer.
 ; Compiled by GitHub Actions on Windows using Inno Setup 6.
 #ifndef BuildVersion
-  #define BuildVersion "2.9.8"
+  #define BuildVersion "2.9.9"
 #endif
 #define AppTitle "TDZIGNS BusinessDesk"
 #define AppExe "TDZIGNS_BusinessDesk.exe"

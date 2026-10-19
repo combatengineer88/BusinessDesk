@@ -17,8 +17,11 @@ from release_layout import valid_release_names, inspect_release
 from installer_assets import select_update_asset, validate_setup_file
 from document_templates import render_document
 from template_editor import open_template_editor
+from visual_templates import load as load_visual_template, render as render_visual_document
+from visual_template_editor import open_visual_template_editor
+from modern_theme import apply as apply_modern_theme
 
-VERSION = '2.9.8'
+VERSION = '2.9.9'
 BUSINESS = 'TDZIGNS LLC'
 RELEASE_MANIFEST_URL = 'https://github.com/combatengineer88/BusinessDesk/releases/latest/download/update_manifest.json'
 TRUSTED_RELEASE_PREFIX = 'https://github.com/combatengineer88/BusinessDesk/releases/download/'
@@ -126,12 +129,16 @@ def post_journal(db, date, memo, source_type, source_id, entries):
 
 def make_pdf(db, kind, record_id, output):
     """Export using the matching, saved document design (with safe defaults)."""
+    if load_visual_template(db,kind) is not None:
+        return render_visual_document(db,kind,record_id,output)
     return render_document(db,kind,record_id,output)
 
 
 class BusinessDesk(BaseApp):
     def __init__(self):
         super().__init__()
+        apply_modern_theme(self.root)
+        self.root.geometry('1350x840')
         self.root.title(f'{BUSINESS} | BusinessDesk {VERSION}')
         # Health acknowledgement to the external updater once the login window is visible.
         self.root.after(400, lambda:signal_ready(DATA, VERSION, Path(sys.executable).resolve()))
@@ -144,9 +151,23 @@ class BusinessDesk(BaseApp):
         return row[0] if row else ''
     def home(self):
         super().home()
+        # Compact captions keep all navigation tabs visible, while retaining stored order.
+        tab_names={'Products / Catalog':'Products','Estimates & Invoices':'Estimates / Invoices',
+                   'Administration':'Admin'}
+        for tab in self.tabs.tabs():
+            caption=self.tabs.tab(tab,'text')
+            if caption in tab_names:self.tabs.tab(tab,text=tab_names[caption])
+        # Replace plain application header with a consistent brand/navigation bar.
+        header=self.root.winfo_children()[0]
+        for child in header.winfo_children():child.destroy()
+        header.configure(style='Header.TFrame',padding=(22,15))
+        ttk.Label(header,text='◼  BUSINESSDESK',style='HeaderTitle.TLabel').pack(side='left',padx=(0,22))
+        ttk.Label(header,text='TDZIGNS LLC  /  Business management',style='HeaderInfo.TLabel').pack(side='left')
+        ttk.Label(header,text=f"{self.user['username']}   •   {self.user['role'].title()}   |   v{VERSION}",
+                  style='HeaderInfo.TLabel').pack(side='right')
         self.tabs.bind('<<NotebookTabChanged>>',self._on_tab_changed)
         self.root.title(f'{BUSINESS} | BusinessDesk {VERSION}')
-        for label,fn in [('Suppliers / Purchase Orders',self.purchase_orders),('Accounting Ledger',self.accounting),('Updates / Branding',self.settings_tab)]:
+        for label,fn in [('Purchase Orders',self.purchase_orders),('Accounting',self.accounting),('Settings / Updates',self.settings_tab)]:
             frame=ttk.Frame(self.tabs,padding=12);self.tabs.add(frame,text=label);fn(frame)
         self._restore_tab_order()
         self.tabs.bind('<ButtonPress-1>',self._tab_drag_start,add='+')
@@ -169,6 +190,10 @@ class BusinessDesk(BaseApp):
         try:
             labels=json.loads(row[0])
             if not isinstance(labels,list):return
+            aliases={'Products / Catalog':'Products','Estimates & Invoices':'Estimates / Invoices',
+                     'Administration':'Admin','Suppliers / Purchase Orders':'Purchase Orders',
+                     'Accounting Ledger':'Accounting','Updates / Branding':'Settings / Updates'}
+            labels=[aliases.get(label,label) for label in labels]
             frames={self.tabs.tab(tab,'text'):tab for tab in self.tabs.tabs()}
             for index,label in enumerate(labels):
                 if label in frames:self.tabs.insert(index,frames[label])
@@ -280,10 +305,35 @@ class BusinessDesk(BaseApp):
         win.wait_window();return out['items']
 
     def dashboard(self,p):
-        super().dashboard(p)
+        invoices=self.db.execute("SELECT count(*),coalesce(sum(total),0) FROM documents WHERE kind='Invoice'").fetchone()
         estimates=self.db.execute("SELECT count(*),coalesce(sum(total),0) FROM documents WHERE kind='Estimate'").fetchone()
-        ttk.Label(p,text=f'Open/created estimates: {estimates[0]}  |  Estimate value: {money(estimates[1])} (not invoiced revenue)',
-                  font=('Segoe UI',11)).pack(anchor='w',pady=10)
+        received=self.db.execute('SELECT coalesce(sum(amount),0) FROM payments').fetchone()[0]
+        expenses=self.db.execute('SELECT coalesce(sum(amount),0) FROM expenses').fetchone()[0]
+        products=self.db.execute('SELECT count(*) FROM products').fetchone()[0]
+        customers=self.db.execute('SELECT count(*) FROM customers').fetchone()[0]
+        ttk.Label(p,text='Overview',style='Section.TLabel').pack(anchor='w',pady=(8,4))
+        ttk.Label(p,text='Key business figures at a glance. Select a tab above to manage records.',
+                  foreground='#64748B').pack(anchor='w',pady=(0,20))
+        stats=[('Invoiced',money(invoices[1]),f'{invoices[0]} invoices'),
+               ('Payments received',money(received),'Recorded invoice payments'),
+               ('Outstanding balance',money(invoices[1]-received),'Invoiced amount less payments'),
+               ('Recorded expenses',money(expenses),'Business expense entries'),
+               ('Estimates',money(estimates[1]),f'{estimates[0]} estimates • not revenue'),
+               ('Catalog products',str(products),'Inventory and available services'),
+               ('Customers',str(customers),'Saved customer records')]
+        grid=ttk.Frame(p);grid.pack(fill='both',expand=False)
+        for i,(name,value,caption) in enumerate(stats):
+            r,c=divmod(i,3)
+            card=ttk.Frame(grid,style='Card.TFrame',padding=(17,16))
+            card.grid(row=r,column=c,sticky='nsew',padx=7,pady=8)
+            ttk.Label(card,text=name,style='CardTitle.TLabel').pack(anchor='w')
+            ttk.Label(card,text=value,style='CardValue.TLabel').pack(anchor='w',pady=(9,7))
+            ttk.Label(card,text=caption,style='CardCaption.TLabel',wraplength=265).pack(anchor='w')
+        for col in range(3):grid.columnconfigure(col,weight=1,uniform='dashboard')
+        ttk.Label(p,text='Financial figures are operational summaries, not a complete accounting ledger or tax report.',
+                  foreground='#64748B').pack(anchor='w',pady=(16,7))
+        ttk.Button(p,text='Refresh overview',style='Accent.TButton',command=self.home).pack(anchor='w',pady=(2,10))
+
     def customers(self,p):
         bar=ttk.Frame(p);bar.pack(fill='x')
         tree=self.table(p,('ID','Name','Email','Phone','Address','Tax-exempt','Notes'))
@@ -867,7 +917,7 @@ class BusinessDesk(BaseApp):
     def edit_document_templates(self):
         if not self.user or self.user['role']!='admin':
             raise PermissionError('Administrator access required to edit document templates.')
-        open_template_editor(self.root,self.db,DATA)
+        open_visual_template_editor(self.root,self.db,DATA)
 
     def settings_tab(self,p):
         ttk.Label(p,text='TDZIGNS LLC | Branding and updates',font=('Segoe UI',17,'bold')).pack(anchor='w',pady=10)
@@ -887,8 +937,16 @@ class BusinessDesk(BaseApp):
         self.button(p,'Edit business details',branding);self.button(p,'Choose company logo',logo)
         ttk.Separator(p).pack(fill='x',pady=12)
         ttk.Label(p,text='Document templates',font=('Segoe UI',12,'bold')).pack(anchor='w',pady=5)
-        ttk.Label(p,text='Customize estimate, invoice, and PO PDF layouts independently. Preview with sample records and save your design.',wraplength=850).pack(anchor='w')
-        self.button(p,'Customize estimate / invoice / PO templates',self.edit_document_templates)
+        ttk.Label(p,text='Design custom estimate, invoice, and PO PDFs by dragging objects onto the page. Preview, save, or use classic settings.',wraplength=850).pack(anchor='w')
+        self.button(p,'Open Visual Template Designer',self.edit_document_templates)
+        def restore_classic():
+            from visual_templates import reset as reset_visual
+            if not messagebox.askyesno('Use classic PDF templates',
+                'Switch estimate, invoice and PO exports back to classic templates? Saved visual designs will be removed.'):return
+            for kind in ('Estimate','Invoice','PO'):reset_visual(self.db,kind)
+            messagebox.showinfo('Classic templates active','Classic document template settings are active again.')
+        self.button(p,'Edit classic template settings',lambda:open_template_editor(self.root,self.db,DATA))
+        self.button(p,'Use classic PDF layouts',restore_classic)
         ttk.Separator(p).pack(fill='x',pady=16)
         ttk.Label(p,text=f'Installed version: {VERSION}').pack(anchor='w')
         row=self.db.execute('SELECT * FROM update_settings WHERE id=1').fetchone()
