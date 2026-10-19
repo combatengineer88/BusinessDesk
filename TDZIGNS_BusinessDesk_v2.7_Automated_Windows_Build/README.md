@@ -1,3 +1,19 @@
+# TDZIGNS BusinessDesk v2.9.8 — Custom PDF document templates
+
+### New: Document Template Designer
+
+Open **Updates / Branding → Customize estimate / invoice / PO templates** as an administrator. You can also open it from **Estimates & Invoices → Customize PDF templates** or **Suppliers / Purchase Orders → Customize PO template**.
+
+Each document type has its own settings: **Classic, Modern, or Compact** layout, accent color, font, US Letter/A4, company logo visibility and placement, company/recipient contact visibility, custom document heading and subtitle, item table column labels, notes heading, terms and conditions, and footer text/page numbers.
+
+Click **Preview PDF** to review your unsaved changes using sample data (nothing is inserted into your business database); **Save template** to keep them; **Restore defaults** to reset the selected document type. Previously saved estimates/invoices/POs retain their recorded monetary amounts. **Re-exporting** an existing PDF will use the *currently selected* document template; previously exported PDFs are not modified.
+
+Templates are saved as JSON in the existing SQLite `settings` table, so they are included with database backups. No document schema migration is necessary, and older installations are compatible with the defaults until you save a customized design. User records remain under `%LOCALAPPDATA%\BusinessDesk`, separate from the Windows installation folder. This is a configurable preset-based PDF designer, not unrestricted pixel-level drag-and-drop editing.
+
+Build via GitHub Actions as usual, pushing **v2.9.8** after committing source changes. GitHub publishes `TDZIGNS_BusinessDesk_Setup_2.9.8.exe`. Do not upload this source-code ZIP into the app's updater. The Windows Setup preserves existing business data but make a backup before upgrading.
+
+---
+
 # BusinessDesk v2.9.6 — Reliable Windows installation and Python DLL fix
 
 See [REPAIR_296_README.md](REPAIR_296_README.md) for one-time recovery, GitHub publishing and testing instructions.

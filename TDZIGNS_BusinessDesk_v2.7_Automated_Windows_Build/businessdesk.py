@@ -15,8 +15,10 @@ from update_support import read_status, signal_ready, STATUS_NAME
 from install_location import choose_install_target, is_temporary_install
 from release_layout import valid_release_names, inspect_release
 from installer_assets import select_update_asset, validate_setup_file
+from document_templates import render_document
+from template_editor import open_template_editor
 
-VERSION = '2.9.7'
+VERSION = '2.9.8'
 BUSINESS = 'TDZIGNS LLC'
 RELEASE_MANIFEST_URL = 'https://github.com/combatengineer88/BusinessDesk/releases/latest/download/update_manifest.json'
 TRUSTED_RELEASE_PREFIX = 'https://github.com/combatengineer88/BusinessDesk/releases/download/'
@@ -123,60 +125,8 @@ def post_journal(db, date, memo, source_type, source_id, entries):
 
 
 def make_pdf(db, kind, record_id, output):
-    from reportlab.lib import colors
-    from reportlab.lib.pagesizes import letter
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.enums import TA_RIGHT
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
-    from reportlab.lib.utils import ImageReader
-    from xml.sax.saxutils import escape
-    settings={r['key']:r['value'] for r in db.execute('SELECT * FROM settings')}
-    sty=getSampleStyleSheet(); sty.add(ParagraphStyle(name='RightTD',parent=sty['Normal'],alignment=TA_RIGHT))
-    def para(t):return Paragraph(escape(str(t or '')).replace('\n','<br/>'),sty['Normal'])
-    story=[]
-    logo=settings.get('logo_path','')
-    if logo and Path(logo).is_file():
-        try:
-            im=ImageReader(logo); w,h=im.getSize(); scale=min(1,170/w,75/h)
-            story.append(Image(logo,width=w*scale,height=h*scale));story.append(Spacer(1,8))
-        except Exception: pass
-    story.append(Paragraph(escape(settings.get('business_name') or BUSINESS),sty['Title']))
-    for key in ('business_address','business_phone','business_email'):
-        if settings.get(key): story.append(para(settings[key]))
-    story.append(Spacer(1,22))
-    if kind=='PO':
-        d=db.execute('SELECT p.*,s.name,s.address FROM purchase_orders p JOIN suppliers s ON s.id=p.supplier_id WHERE p.id=?',(record_id,)).fetchone()
-        if not d: raise ValueError('Purchase order not found')
-        heading=f'PURCHASE ORDER #{record_id}'
-        recipient=f'Supplier: {d["name"]}'
-        date=d['ordered_on']
-        rows=[['Product','Quantity','Unit cost','Line total']]
-        for x in db.execute('SELECT i.*,p.name FROM po_items i JOIN products p ON p.id=i.product_id WHERE i.po_id=?',(record_id,)):
-            rows.append([para(x['name']),str(x['qty']),money(x['unit_cost']),money(x['qty']*x['unit_cost'])])
-        subtotal=d['total'];tax=0;total=d['total']
-    else:
-        d=db.execute('SELECT d.*,c.name,c.address,c.email FROM documents d JOIN customers c ON c.id=d.customer_id WHERE d.id=?',(record_id,)).fetchone()
-        if not d: raise ValueError('Document not found')
-        heading=f'{d["kind"].upper()} #{record_id}'
-        recipient=f'Customer: {d["name"]}'
-        date=d['created']
-        rows=[['Item','Quantity','Unit price','Line total']]
-        for x in db.execute('SELECT * FROM document_items WHERE document_id=?',(record_id,)):
-            rows.append([para(x['description']),str(x['qty']),money(x['unit_price']),money(x['line_total'])])
-        subtotal=d['subtotal'];tax=d['tax'];total=d['total']
-    story.extend([Paragraph(escape(heading),sty['Heading1']),para(recipient),para(f'Date: {date}'),Spacer(1,16)])
-    t=Table(rows,colWidths=[250,65,90,90],repeatRows=1,hAlign='LEFT')
-    t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#183653')),
-                           ('TEXTCOLOR',(0,0),(-1,0),colors.white),('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.white,colors.HexColor('#f0f4f8')]),
-                           ('BOTTOMPADDING',(0,0),(-1,-1),9),('TOPPADDING',(0,0),(-1,-1),9),
-                           ('VALIGN',(0,0),(-1,-1),'TOP'),('LINEBELOW',(0,-1),(-1,-1),0.5,colors.grey)]))
-    story.extend([t,Spacer(1,16)])
-    for name,value in [('Subtotal',subtotal),('Tax',tax),('TOTAL',total)]:
-        if kind=='PO' and name=='Tax':continue
-        story.append(Paragraph(f'<b>{name}: {escape(money(value))}</b>',sty['RightTD']))
-        story.append(Spacer(1,5))
-    if d['notes']:story.extend([Spacer(1,18),para('Notes: '+d['notes'])])
-    SimpleDocTemplate(str(output),pagesize=letter,rightMargin=40,leftMargin=40,topMargin=35,bottomMargin=35).build(story)
+    """Export using the matching, saved document design (with safe defaults)."""
+    return render_document(db,kind,record_id,output)
 
 
 class BusinessDesk(BaseApp):
@@ -621,6 +571,7 @@ class BusinessDesk(BaseApp):
         self.button(bar,'Convert estimate to invoice',convert_selected)
         self.button(bar,'Record invoice payment',pay_selected)
         self.button(bar,'Export selected branded PDF',export_pdf)
+        if self.user['role']=='admin':self.button(bar,'Customize PDF templates',self.edit_document_templates)
     def select_po_supplier(self):
         """Pick a saved supplier by name; keep the numeric ID internal."""
         suppliers=list(self.db.execute('SELECT id,name FROM suppliers ORDER BY name COLLATE NOCASE,id'))
@@ -792,6 +743,7 @@ class BusinessDesk(BaseApp):
             if path:make_pdf(self.db,'PO',id,path);messagebox.showinfo('Saved','Purchase order PDF exported.')
         self.button(bar,'Add supplier',supplier);self.button(bar,'New PO',create)
         self.button(bar,'Receive entire PO',receive);self.button(bar,'Export PO PDF',pdf)
+        if self.user['role']=='admin':self.button(bar,'Customize PO template',self.edit_document_templates)
         ttk.Label(p,text='Receiving a PO increases inventory and records an accounts payable liability. Partial receiving and vendor payment are not yet supported.').pack(anchor='w')
         refresh()
     def accounting(self,p):
@@ -912,6 +864,11 @@ class BusinessDesk(BaseApp):
         finally:
             temporary.unlink(missing_ok=True)
 
+    def edit_document_templates(self):
+        if not self.user or self.user['role']!='admin':
+            raise PermissionError('Administrator access required to edit document templates.')
+        open_template_editor(self.root,self.db,DATA)
+
     def settings_tab(self,p):
         ttk.Label(p,text='TDZIGNS LLC | Branding and updates',font=('Segoe UI',17,'bold')).pack(anchor='w',pady=10)
         if self.user['role']!='admin':
@@ -927,7 +884,11 @@ class BusinessDesk(BaseApp):
             if not path:return
             dest=DATA/('business_logo'+Path(path).suffix.lower());shutil.copy2(path,dest)
             with self.db:self.db.execute('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)',('logo_path',str(dest)))
-        self.button(p,'Edit business details',branding);self.button(p,'Choose invoice logo',logo)
+        self.button(p,'Edit business details',branding);self.button(p,'Choose company logo',logo)
+        ttk.Separator(p).pack(fill='x',pady=12)
+        ttk.Label(p,text='Document templates',font=('Segoe UI',12,'bold')).pack(anchor='w',pady=5)
+        ttk.Label(p,text='Customize estimate, invoice, and PO PDF layouts independently. Preview with sample records and save your design.',wraplength=850).pack(anchor='w')
+        self.button(p,'Customize estimate / invoice / PO templates',self.edit_document_templates)
         ttk.Separator(p).pack(fill='x',pady=16)
         ttk.Label(p,text=f'Installed version: {VERSION}').pack(anchor='w')
         row=self.db.execute('SELECT * FROM update_settings WHERE id=1').fetchone()
