@@ -21,8 +21,9 @@ from template_editor import open_template_editor
 from visual_templates import load as load_visual_template, render as render_visual_document
 from visual_template_editor import open_visual_template_editor
 from modern_theme import apply as apply_modern_theme
+from home_workspace import HomeWorkspace
 
-VERSION = '2.9.10'
+VERSION = '2.9.11'
 BUSINESS = 'TDZIGNS LLC'
 RELEASE_MANIFEST_URL = 'https://github.com/combatengineer88/BusinessDesk/releases/latest/download/update_manifest.json'
 TRUSTED_RELEASE_PREFIX = 'https://github.com/combatengineer88/BusinessDesk/releases/download/'
@@ -151,6 +152,9 @@ class BusinessDesk(BaseApp):
         row=self.db.execute('SELECT value FROM settings WHERE key=?',(key,)).fetchone()
         return row[0] if row else ''
     def home(self):
+        # Existing tab callbacks register themselves while BaseApp constructs
+        # the other screens. Rebuild this mapping whenever the UI is rebuilt.
+        self._home_actions={}
         super().home()
         # Compact captions keep all navigation tabs visible, while retaining stored order.
         tab_names={'Products / Catalog':'Products','Estimates & Invoices':'Estimates / Invoices',
@@ -170,7 +174,19 @@ class BusinessDesk(BaseApp):
         self.root.title(f'{BUSINESS} | BusinessDesk {VERSION}')
         for label,fn in [('Purchase Orders',self.purchase_orders),('Accounting',self.accounting),('Settings / Updates',self.settings_tab)]:
             frame=ttk.Frame(self.tabs,padding=12);self.tabs.add(frame,text=label);fn(frame)
+        home_frame=ttk.Frame(self.tabs,padding=0)
+        self.tabs.add(home_frame,text='Home')
+        self.tabs.insert(0,home_frame)
+        HomeWorkspace(self,home_frame)
         self._restore_tab_order()
+        # Before Home existed, saved tab arrangements could have displaced it.
+        # Keep it first for those users; once dragged, honor its saved position.
+        tab_order=self.setting('tab_order')
+        try:
+            explicit_home='Home' in json.loads(tab_order) if tab_order else False
+        except (ValueError,TypeError):explicit_home=False
+        if not explicit_home:self.tabs.insert(0,home_frame)
+        self.tabs.select(home_frame)
         self.tabs.bind('<ButtonPress-1>',self._tab_drag_start,add='+')
         self.tabs.bind('<ButtonRelease-1>',self._tab_drag_end,add='+')
         if not getattr(self,'_update_checked',False):
@@ -181,10 +197,98 @@ class BusinessDesk(BaseApp):
     def _on_tab_changed(self,event):
         # Refresh dashboard when revisited; do not rebuild the whole notebook.
         selected=self.tabs.select()
-        if selected and self.tabs.tab(selected,'text')=='Dashboard':
-            frame=self.tabs.nametowidget(selected)
-            for widget in frame.winfo_children():widget.destroy()
-            self.dashboard(frame)
+        if selected:
+            label=self.tabs.tab(selected,'text')
+            if label in ('Dashboard','Home'):
+                frame=self.tabs.nametowidget(selected)
+                for widget in frame.winfo_children():widget.destroy()
+                if label=='Dashboard':self.dashboard(frame)
+                else:HomeWorkspace(self,frame)
+    def register_home_action(self,action,callback,tree=None,selector=None):
+        """Expose the existing tab callback to a Home shortcut.
+
+        selector receives a Treeview row values sequence when selecting records.
+        """
+        self._home_actions[action]=(callback,tree,selector)
+
+    def _home_choose_record(self,tree,action,selector=None):
+        records=[]
+        for iid in tree.get_children(''):
+            values=tree.item(iid,'values')
+            if selector is None or selector(values):
+                records.append((iid,values))
+        if not records:
+            raise ValueError('No eligible records found. Create the required record first.')
+        dialog=tk.Toplevel(self.root)
+        dialog.title('Choose a record')
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.geometry('650x420')
+        dialog.minsize(490,300)
+        frame=ttk.Frame(dialog,padding=16);frame.pack(fill='both',expand=True)
+        ttk.Label(frame,text='Select the record to continue',style='Section.TLabel').pack(anchor='w',pady=(0,10))
+        ttk.Label(frame,text='The action will use the selected existing record. Nothing is changed until you confirm the action.',
+                  wraplength=570).pack(anchor='w',pady=(0,8))
+        box=tk.Listbox(frame,font=('Segoe UI',10),activestyle='dotbox',exportselection=False)
+        box.pack(fill='both',expand=True,pady=6)
+        for _,values in records:
+            label='    |    '.join(str(value) for value in values[:5])
+            box.insert('end',label[:150])
+        box.selection_set(0)
+        result={'iid':None}
+        def accept():
+            selection=box.curselection()
+            if not selection:return
+            result['iid']=records[selection[0]][0]
+            dialog.destroy()
+        btns=ttk.Frame(frame);btns.pack(fill='x',pady=(10,0))
+        ttk.Button(btns,text='Cancel',command=dialog.destroy).pack(side='right',padx=5)
+        ttk.Button(btns,text='Continue',style='Accent.TButton',command=accept).pack(side='right')
+        box.bind('<Double-Button-1>',lambda e:accept())
+        dialog.bind('<Return>',lambda e:accept())
+        dialog.bind('<Escape>',lambda e:dialog.destroy())
+        dialog.wait_window()
+        if result['iid'] is not None:
+            tree.selection_set(result['iid'])
+            tree.see(result['iid'])
+        return result['iid'] is not None
+
+    def navigate_home_action(self,action):
+        """Open the owning tab and reuse its real callback, with row selection."""
+        targets={
+            'supplier.add':'Purchase Orders','supplier.import':'Purchase Orders',
+            'po.new':'Purchase Orders','po.edit':'Purchase Orders','po.receive':'Purchase Orders',
+            'customer.add':'Customers','customer.import':'Customers',
+            'customer.edit':'Customers','customer.pricing':'Customers',
+            'estimate.new':'Estimates / Invoices','estimate.convert':'Estimates / Invoices',
+            'invoice.payment':'Estimates / Invoices',
+            'product.add':'Products','product.import':'Products','product.edit':'Products',
+            'dashboard':'Dashboard','expense.add':'Expenses','reports':'Reports',
+            'accounting':'Accounting','admin':'Admin','templates':'Settings / Updates',
+            'settings':'Settings / Updates',
+        }
+        if action not in targets:raise ValueError('This action is not available.')
+        if action in ('admin','templates') and self.user['role']!='admin':
+            raise PermissionError('Administrator access required.')
+        target=targets[action]
+        matching=[t for t in self.tabs.tabs() if self.tabs.tab(t,'text')==target]
+        if not matching:raise RuntimeError(f'{target} is not available.')
+        self.tabs.select(matching[0])
+        if action=='templates':
+            self.safe(self.edit_document_templates)
+            return
+        if action not in self._home_actions:
+            # Screen-only shortcuts are always useful even without row data.
+            return
+        callback,tree,selector=self._home_actions[action]
+        if tree is not None:
+            try:
+                if not self._home_choose_record(tree,action,selector):return
+            except Exception as exc:
+                self.error(exc)
+                return
+        self.safe(callback)
+
     def _restore_tab_order(self):
         row=self.db.execute("SELECT value FROM settings WHERE key='tab_order'").fetchone()
         if not row:return
@@ -367,6 +471,10 @@ class BusinessDesk(BaseApp):
             ttk.Button(win,text='Save',command=save).grid(row=7,column=1,pady=12,sticky='e')
             ttk.Button(win,text='Cancel',command=win.destroy).grid(row=7,column=0,pady=12)
             win.wait_window()
+        self.register_home_action('customer.add',lambda:edit(True))
+        self.register_home_action('customer.edit',edit,tree)
+        self.register_home_action('customer.pricing',lambda:self.customer_price_manager(self.selected(tree)),tree)
+        self.register_home_action('customer.import',lambda:self.import_excel_dialog('customers'))
         self.button(bar,'Add customer',lambda:edit(True))
         self.button(bar,'Edit selected',edit)
         self.button(bar,'Customer product prices',lambda:self.customer_price_manager(self.selected(tree)))
@@ -570,6 +678,9 @@ class BusinessDesk(BaseApp):
                 img=Image.open(r['image_path']);img.thumbnail((700,500));photo=ImageTk.PhotoImage(img)
             except ImportError:photo=tk.PhotoImage(file=r['image_path'])
             label=tk.Label(win,image=photo);label.image=photo;label.pack(padx=10,pady=10)
+        self.register_home_action('product.add',lambda:edit(True))
+        self.register_home_action('product.edit',edit,tree)
+        self.register_home_action('product.import',lambda:self.import_excel_dialog('products'))
         self.button(bar,'Add product',lambda:edit(True));self.button(bar,'Edit',edit)
         self.button(bar,'Import products from Excel',lambda:self.import_excel_dialog('products'))
         self.button(bar,'Attach image',attach_image);self.button(bar,'View image',view_image)
@@ -619,6 +730,10 @@ class BusinessDesk(BaseApp):
             record_invoice_payment(self.db,docid,cents(v['amount']),v['method'])
             messagebox.showinfo('Payment saved',f'Payment recorded for invoice #{docid}.')
             self.home()
+        self.register_home_action('estimate.convert',convert_selected,tree,
+                                  lambda v:len(v)>1 and v[1]=='Estimate')
+        self.register_home_action('invoice.payment',pay_selected,tree,
+                                  lambda v:len(v)>4 and v[1]=='Invoice' and v[4]!='Paid' and v[7]!= '$0.00')
         self.button(bar,'Convert estimate to invoice',convert_selected)
         self.button(bar,'Record invoice payment',pay_selected)
         self.button(bar,'Export selected branded PDF',export_pdf)
@@ -795,6 +910,13 @@ class BusinessDesk(BaseApp):
             id=self.selected(tree)
             path=filedialog.asksaveasfilename(defaultextension='.pdf',initialfile=f'PO_{id}.pdf',filetypes=[('PDF','*.pdf')])
             if path:make_pdf(self.db,'PO',id,path);messagebox.showinfo('Saved','Purchase order PDF exported.')
+        self.register_home_action('supplier.add',supplier)
+        self.register_home_action('supplier.import',lambda:self.import_excel_dialog('suppliers'))
+        self.register_home_action('po.new',create)
+        self.register_home_action('po.edit',edit,tree,
+                                  lambda v:len(v)>3 and v[3]=='Open')
+        self.register_home_action('po.receive',receive,tree,
+                                  lambda v:len(v)>3 and v[3]=='Open')
         self.button(bar,'Add supplier',supplier);self.button(bar,'New PO',create)
         self.button(bar,'Edit selected PO',edit)
         tree.bind('<Double-1>',lambda event:self.safe(edit))

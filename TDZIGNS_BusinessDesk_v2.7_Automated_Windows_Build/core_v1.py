@@ -300,6 +300,8 @@ class App:
             if filename:
                 Path(filename).write_text("\n".join(lines),encoding="utf-8")
                 messagebox.showinfo("Saved","Document exported as printable text.")
+        if hasattr(self,'register_home_action'):
+            self.register_home_action('estimate.new',create)
         self.button(bar,"New estimate / invoice",create);self.button(bar,"Record payment",payment)
         self.button(bar,"Export selected document",print_doc)
         refresh()
@@ -319,6 +321,8 @@ class App:
             with self.db:self.db.execute("INSERT INTO expenses(spent_on,category,vendor,description,amount) VALUES(?,?,?,?,?)",
                                         (v["spent_on"],v["category"],v["vendor"],v["description"],cents(v["amount"])))
             refresh()
+        if hasattr(self,'register_home_action'):
+            self.register_home_action('expense.add',add)
         self.button(bar,"Add expense",add)
         self.button(bar,"Export expenses CSV",lambda:self.export("SELECT spent_on,category,vendor,description,amount/100.0 AS amount FROM expenses"))
         refresh()
