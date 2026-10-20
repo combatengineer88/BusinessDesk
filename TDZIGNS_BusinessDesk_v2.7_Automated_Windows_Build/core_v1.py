@@ -5,6 +5,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from tkinter import ttk, messagebox, filedialog, simpledialog
+from responsive_ui import ResponsiveToolbar
 
 APP="BusinessDesk"
 DATA=Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / APP
@@ -130,20 +131,30 @@ class App:
             frame=ttk.Frame(tabs,padding=12);tabs.add(frame,text=label);fn(frame)
     def table(self,parent,columns):
         frame=ttk.Frame(parent);frame.pack(fill="both",expand=True,pady=8)
+        frame.rowconfigure(0,weight=1)
+        frame.columnconfigure(0,weight=1)
         tree=ttk.Treeview(frame,columns=columns,show="headings",selectmode="browse")
         for c in columns:
             tree.heading(c,text=c)
-            tree.column(c,width=130,anchor="w")
-        sc=ttk.Scrollbar(frame,orient="vertical",command=tree.yview)
-        tree.configure(yscrollcommand=sc.set)
-        tree.pack(side="left",fill="both",expand=True);sc.pack(side="right",fill="y")
+            name=str(c).casefold()
+            width=(65 if name=='id' else (195 if any(x in name for x in ('address','email','name','description'))
+                    else (115 if name in ('city','state','zip','phone') else 130)))
+            tree.column(c,width=width,anchor="w",stretch=False)
+        vertical=ttk.Scrollbar(frame,orient="vertical",command=tree.yview)
+        horizontal=ttk.Scrollbar(frame,orient="horizontal",command=tree.xview)
+        tree.configure(yscrollcommand=vertical.set,xscrollcommand=horizontal.set)
+        tree.grid(row=0,column=0,sticky="nsew")
+        vertical.grid(row=0,column=1,sticky="ns")
+        horizontal.grid(row=1,column=0,sticky="ew")
         return tree
     def selected(self,tree):
         item=tree.selection()
         if not item: raise ValueError("Select a row first.")
         return int(tree.item(item[0],"values")[0])
     def button(self,parent,label,callback):
-        ttk.Button(parent,text=label,command=lambda:self.safe(callback)).pack(side="left",padx=4,pady=5)
+        if isinstance(parent,ResponsiveToolbar):
+            return parent.add_action(label,lambda:self.safe(callback))
+        return ttk.Button(parent,text=label,command=lambda:self.safe(callback)).pack(side="left",padx=4,pady=5)
     def safe(self,callback):
         try: callback()
         except Exception as e: self.error(e)
@@ -162,7 +173,7 @@ class App:
                   foreground="#666").pack(anchor="w",pady=20)
         self.button(p,"Refresh dashboard",self.home)
     def customers(self,p):
-        bar=ttk.Frame(p);bar.pack(fill="x")
+        bar=ResponsiveToolbar(p);bar.pack(fill="x")
         tree=self.table(p,("ID","Name","Email","Phone","Address","Notes"))
         def refresh():
             tree.delete(*tree.get_children())
@@ -181,7 +192,7 @@ class App:
         self.button(bar,"Add customer",lambda:edit(True));self.button(bar,"Edit selected",edit)
         refresh()
     def products(self,p):
-        bar=ttk.Frame(p);bar.pack(fill="x")
+        bar=ResponsiveToolbar(p);bar.pack(fill="x")
         tree=self.table(p,("ID","SKU","Name","Description","Price","Cost","Stock"))
         def refresh():
             tree.delete(*tree.get_children())
@@ -206,7 +217,7 @@ class App:
         self.button(bar,"Export catalog CSV",lambda:self.export("SELECT sku,name,description,price/100.0 AS price,cost/100.0 AS cost,qty FROM products"))
         refresh()
     def documents(self,p):
-        bar=ttk.Frame(p);bar.pack(fill="x")
+        bar=ResponsiveToolbar(p);bar.pack(fill="x")
         tree=self.table(p,("ID","Type","Customer","Date","Status","Total","Paid","Balance"))
         def refresh():
             tree.delete(*tree.get_children())
@@ -306,7 +317,7 @@ class App:
         self.button(bar,"Export selected document",print_doc)
         refresh()
     def expenses(self,p):
-        bar=ttk.Frame(p);bar.pack(fill="x")
+        bar=ResponsiveToolbar(p);bar.pack(fill="x")
         tree=self.table(p,("ID","Date","Category","Vendor","Description","Amount"))
         def refresh():
             tree.delete(*tree.get_children())
@@ -349,6 +360,8 @@ class App:
         ttk.Label(p,text="Exports can be opened in Excel. Reports use recorded entries only.").pack(anchor="w",pady=12)
     def admin(self,p):
         ttk.Label(p,text="Administration",font=("Segoe UI",17,"bold")).pack(anchor="w",pady=10)
+        actions=ResponsiveToolbar(p)
+        actions.pack(fill="x",pady=(0,10))
         if self.user["role"]=="admin":
             def add_user():
                 v=self.form("Add employee",[("username","Username"),("password","Temporary password (10+ characters)"),("role","Role: admin or staff")],
@@ -358,7 +371,7 @@ class App:
                 with self.db:self.db.execute("INSERT INTO users(username,password,role) VALUES(?,?,?)",
                                              (v["username"],hashed(v["password"]),v["role"]))
                 messagebox.showinfo("Created","Employee account created.")
-            self.button(p,"Add employee login",add_user)
+            self.button(actions,"Add employee login",add_user)
         def change_password():
             old=simpledialog.askstring("Password","Current password",show="*",parent=self.root)
             if old is None:return
@@ -369,7 +382,7 @@ class App:
             if len(new)<10:raise ValueError("Password must be at least 10 characters.")
             with self.db:self.db.execute("UPDATE users SET password=? WHERE id=?",(hashed(new),self.user["id"]))
             messagebox.showinfo("Updated","Password changed.")
-        self.button(p,"Change my password",change_password)
+        self.button(actions,"Change my password",change_password)
         if self.user["role"]=="admin":
             def backup():
                 path=filedialog.asksaveasfilename(defaultextension=".db",initialfile=f'business_backup_{datetime.now():%Y%m%d}.db',
@@ -378,8 +391,8 @@ class App:
                 if Path(path).resolve()==DB.resolve():raise ValueError("Choose a different backup destination.")
                 with sqlite3.connect(path) as target:self.db.backup(target)
                 messagebox.showinfo("Backup","Database backup created. Store a copy somewhere safe.")
-            self.button(p,"Backup database",backup)
-        self.button(p,"Sign out",lambda:(setattr(self,"user",None),self.login()))
+            self.button(actions,"Backup database",backup)
+        self.button(actions,"Sign out",lambda:(setattr(self,"user",None),self.login()))
         ttk.Label(p,text=f"Local database: {DB}",wraplength=850).pack(anchor="w",pady=25)
     def run(self):self.root.mainloop()
 

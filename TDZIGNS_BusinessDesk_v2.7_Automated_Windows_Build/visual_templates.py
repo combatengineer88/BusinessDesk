@@ -7,6 +7,7 @@ import copy
 import json
 import re
 import uuid
+from address_utils import customer_address
 from pathlib import Path
 from reportlab.lib.pagesizes import letter, A4
 from reportlab.lib import colors
@@ -136,7 +137,8 @@ def document_data(db,kind,record_id,preview=False):
             items=db.execute('SELECT p.name, i.qty, i.unit_cost FROM po_items i JOIN products p ON p.id=i.product_id WHERE i.po_id=? ORDER BY i.id',(record_id,)).fetchall()
             total=int(row['total']); tax=0
         else:
-            row=db.execute('SELECT d.*,c.name,c.address,c.email FROM documents d JOIN customers c ON d.customer_id=c.id WHERE d.id=?',(record_id,)).fetchone()
+            postal='c.city,c.state,c.zip_code' if {'city','state','zip_code'} <= {r[1] for r in db.execute('PRAGMA table_info(customers)')} else "'' AS city,'' AS state,'' AS zip_code"
+            row=db.execute(f'SELECT d.*,c.name,c.address,c.email,{postal} FROM documents d JOIN customers c ON d.customer_id=c.id WHERE d.id=?',(record_id,)).fetchone()
             if row is None or row['kind']!=kind:raise ValueError('Document not found or wrong type')
             items=db.execute('SELECT description,qty,unit_price FROM document_items WHERE document_id=? ORDER BY id',(record_id,)).fetchall()
             total=int(row['total']); tax=int(row['tax'])
@@ -145,7 +147,7 @@ def document_data(db,kind,record_id,preview=False):
         result={
             'customer_name':row['name'] if kind!='PO' else '',
             'supplier_name':row['name'] if kind=='PO' else '',
-            'customer_address':(row['address'] or '') if kind!='PO' else '',
+            'customer_address':customer_address(row['address'],row['city'],row['state'],row['zip_code']) if kind!='PO' else '',
             'supplier_address':(row['address'] or '') if kind=='PO' else '',
             'customer_email':(row['email'] or '') if kind!='PO' else '',
             'supplier_email':(row['email'] or '') if kind=='PO' else '',

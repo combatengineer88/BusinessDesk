@@ -241,20 +241,31 @@ class HomeWorkspace:
         self._node(center,top-21,bw,bh,SUPPLY_FLOW[1],BLUE)
         self._node(center,top+55,bw,bh,SUPPLY_FLOW[2],BLUE)
         self._node(right,top,bw,bh,SUPPLY_FLOW[3],BLUE)
-        # Two branching options then merge to supplier settlement.
-        self._arrow(left+bw,top+bh/2,center-14,top+bh/2,BLUE)
-        self._arrow(center-14,top+bh/2,center,top-21+bh/2,BLUE)
-        self._arrow(center-14,top+bh/2,center,top+55+bh/2,BLUE)
-        self._arrow(center+bw,top-21+bh/2,right-20,top+bh/2,BLUE)
-        self._arrow(center+bw,top+55+bh/2,right-20,top+bh/2,BLUE)
-        self._arrow(right-20,top+bh/2,right,top+bh/2,BLUE)
-        # Customer flow: estimate -> invoice -> payment.
+        # Architectural flowchart routing, mirroring the hand-drawn sketch:
+        # horizontal trunk -> vertical fork -> individual receiving steps ->
+        # vertical merge -> horizontal trunk -> supplier settlement.
+        top_center=top+bh/2
+        upper_center=top-21+bh/2
+        lower_center=top+55+bh/2
+        fork=center-34
+        merge=right-36
+        self._connector(((left+bw,top_center),(fork,top_center)),BLUE)
+        self._connector(((fork,upper_center),(fork,lower_center)),BLUE)
+        self._connector(((fork,upper_center),(center,upper_center)),BLUE)
+        self._connector(((fork,lower_center),(center,lower_center)),BLUE)
+        self._connector(((center+bw,upper_center),(merge,upper_center)),BLUE)
+        self._connector(((center+bw,lower_center),(merge,lower_center)),BLUE)
+        self._connector(((merge,upper_center),(merge,lower_center)),BLUE)
+        self._connector(((merge,top_center),(right,top_center)),BLUE,ending=True)
+        self._joint(fork,top_center,BLUE)
+        self._joint(merge,top_center,BLUE)
+        # Separate straight-through customer flow in the lower lane.
         y=333
         self._node(left,y,bw,bh,CUSTOMER_FLOW[0],GREEN)
         self._node(center,y,bw,bh,CUSTOMER_FLOW[1],GREEN)
         self._node(right,y,bw,bh,CUSTOMER_FLOW[2],GREEN)
-        self._arrow(left+bw,y+bh/2,center,y+bh/2,GREEN)
-        self._arrow(center+bw,y+bh/2,right,y+bh/2,GREEN)
+        self._connector(((left+bw,y+bh/2),(center,y+bh/2)),GREEN,ending=True)
+        self._connector(((center+bw,y+bh/2),(right,y+bh/2)),GREEN,ending=True)
         c.tag_raise('workflow_node')
         c.tag_raise('workflow_text')
 
@@ -286,11 +297,17 @@ class HomeWorkspace:
             c.create_text(x+w-14,y+11,text='SOON',anchor='e',fill=UNAVAILABLE,
                           font=('Segoe UI',7,'bold'),tags=('workflow_text',tag))
 
-    def _arrow(self,x1,y1,x2,y2,color):
-        c=self.flow
-        if x2<=x1:return
-        c.create_line(x1+2,y1,x2-5,y2,fill=color,width=2,arrow='last',arrowshape=(10,12,5),
-                      smooth=abs(y2-y1)>5,capstyle=tk.ROUND)
+    def _connector(self,points,color,ending=False):
+        """Right-angle routes only; no diagonals or bezier curves."""
+        args=[coord for point in points for coord in point]
+        self.flow.create_line(*args,fill=color,width=3,capstyle=tk.ROUND,
+                              joinstyle=tk.ROUND,arrow='last' if ending else 'none',
+                              arrowshape=(8,10,4),tags=('workflow_connector',))
+
+    def _joint(self,x,y,color):
+        r=3.6
+        self.flow.create_oval(x-r,y-r,x+r,y+r,fill=color,outline=PALE_BLUE,
+                              width=1,tags=('workflow_connector',))
 
     def _action_under_pointer(self):
         current=self.flow.find_withtag('current')

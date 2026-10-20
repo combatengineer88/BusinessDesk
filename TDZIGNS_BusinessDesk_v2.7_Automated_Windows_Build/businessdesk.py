@@ -22,8 +22,10 @@ from visual_templates import load as load_visual_template, render as render_visu
 from visual_template_editor import open_visual_template_editor
 from modern_theme import apply as apply_modern_theme
 from home_workspace import HomeWorkspace
+from responsive_ui import ResponsiveToolbar, scrollable_page
+from report_export import export_report_pdf
 
-VERSION = '2.9.11'
+VERSION = '2.9.12'
 BUSINESS = 'TDZIGNS LLC'
 RELEASE_MANIFEST_URL = 'https://github.com/combatengineer88/BusinessDesk/releases/latest/download/update_manifest.json'
 TRUSTED_RELEASE_PREFIX = 'https://github.com/combatengineer88/BusinessDesk/releases/download/'
@@ -58,6 +60,10 @@ def schema(db):
     if 'image_path' not in cols: db.execute('ALTER TABLE products ADD COLUMN image_path TEXT DEFAULT \'\'')
     if 'barcode' not in cols: db.execute('ALTER TABLE products ADD COLUMN barcode TEXT DEFAULT \'\'')
     columns={r[1] for r in db.execute('PRAGMA table_info(customers)')}
+    # Add discrete address columns without rewriting existing free-form addresses.
+    for field in ('city','state','zip_code'):
+        if field not in columns:
+            db.execute(f"ALTER TABLE customers ADD COLUMN {field} TEXT NOT NULL DEFAULT ''")
     if 'tax_exempt' not in columns:
         db.execute('ALTER TABLE customers ADD COLUMN tax_exempt INTEGER NOT NULL DEFAULT 0 CHECK(tax_exempt IN (0,1))')
     db.execute("""CREATE TABLE IF NOT EXISTS customer_prices(
@@ -167,7 +173,8 @@ class BusinessDesk(BaseApp):
         for child in header.winfo_children():child.destroy()
         header.configure(style='Header.TFrame',padding=(22,15))
         ttk.Label(header,text='◼  BUSINESSDESK',style='HeaderTitle.TLabel').pack(side='left',padx=(0,22))
-        ttk.Label(header,text='TDZIGNS LLC  /  Business management',style='HeaderInfo.TLabel').pack(side='left')
+        self._header_subtitle=ttk.Label(header,text='TDZIGNS LLC  /  Business management',style='HeaderInfo.TLabel')
+        self._header_subtitle.pack(side='left')
         ttk.Label(header,text=f"{self.user['username']}   •   {self.user['role'].title()}   |   v{VERSION}",
                   style='HeaderInfo.TLabel').pack(side='right')
         self.tabs.bind('<<NotebookTabChanged>>',self._on_tab_changed)
@@ -189,16 +196,39 @@ class BusinessDesk(BaseApp):
         self.tabs.select(home_frame)
         self.tabs.bind('<ButtonPress-1>',self._tab_drag_start,add='+')
         self.tabs.bind('<ButtonRelease-1>',self._tab_drag_end,add='+')
+        # Compact navigation captions, the header, and action bars at narrower widths.
+        self._full_tab_labels={tab:self.tabs.tab(tab,'text') for tab in self.tabs.tabs()}
+        self.root.bind('<Configure>',self._adapt_layout,add='+')
+        self.root.after_idle(self._adapt_layout)
         if not getattr(self,'_update_checked',False):
             self._update_checked=True
             cfg=self.db.execute('SELECT manifest_url,check_at_launch FROM update_settings WHERE id=1').fetchone()
             if cfg and cfg['check_at_launch']:
                 self.root.after(600,lambda url=(cfg['manifest_url'] or RELEASE_MANIFEST_URL):self.check_updates(url))
+    def _adapt_layout(self,event=None):
+        if event is not None and event.widget is not self.root:return
+        if not getattr(self,'tabs',None) or not self.tabs.winfo_exists():return
+        compact=self.root.winfo_width()<1150
+        aliases={'Dashboard':'Overview','Purchase Orders':'POs',
+                 'Estimates / Invoices':'Est. / Inv.','Settings / Updates':'Settings'}
+        for tab,full in getattr(self,'_full_tab_labels',{}).items():
+            if tab not in self.tabs.tabs():continue
+            target=aliases.get(full,full) if compact else full
+            if self.tabs.tab(tab,'text')!=target:self.tabs.tab(tab,text=target)
+        style=ttk.Style(self.root)
+        style.configure('TNotebook.Tab',font=('Segoe UI',9 if compact else 10,'bold'),
+                        padding=(6,6) if compact else (12,9))
+        subtitle=getattr(self,'_header_subtitle',None)
+        if subtitle and subtitle.winfo_exists():
+            if self.root.winfo_width()<1010 and subtitle.winfo_manager():subtitle.pack_forget()
+            elif self.root.winfo_width()>=1010 and not subtitle.winfo_manager():
+                subtitle.pack(side='left')
+
     def _on_tab_changed(self,event):
         # Refresh dashboard when revisited; do not rebuild the whole notebook.
         selected=self.tabs.select()
         if selected:
-            label=self.tabs.tab(selected,'text')
+            label=getattr(self,'_full_tab_labels',{}).get(selected,self.tabs.tab(selected,'text'))
             if label in ('Dashboard','Home'):
                 frame=self.tabs.nametowidget(selected)
                 for widget in frame.winfo_children():widget.destroy()
@@ -271,7 +301,7 @@ class BusinessDesk(BaseApp):
         if action in ('admin','templates') and self.user['role']!='admin':
             raise PermissionError('Administrator access required.')
         target=targets[action]
-        matching=[t for t in self.tabs.tabs() if self.tabs.tab(t,'text')==target]
+        matching=[t for t in self.tabs.tabs() if getattr(self,'_full_tab_labels',{}).get(t,self.tabs.tab(t,'text'))==target]
         if not matching:raise RuntimeError(f'{target} is not available.')
         self.tabs.select(matching[0])
         if action=='templates':
@@ -320,7 +350,7 @@ class BusinessDesk(BaseApp):
             if destination!=source:
                 moving=self.tabs.tabs()[source]
                 self.tabs.insert(destination,moving)
-                order=[self.tabs.tab(tab,'text') for tab in self.tabs.tabs()]
+                order=[getattr(self,'_full_tab_labels',{}).get(tab,self.tabs.tab(tab,'text')) for tab in self.tabs.tabs()]
                 with self.db:
                     self.db.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('tab_order',?)",
                                     (json.dumps(order),))
@@ -331,20 +361,25 @@ class BusinessDesk(BaseApp):
             FROM products p LEFT JOIN customer_prices cp ON cp.product_id=p.id AND cp.customer_id=?
             ORDER BY p.name,p.sku''',(customer_id if customer_id is not None else -1,)))
         if not products:raise ValueError('Add products to the catalog first.')
-        win=tk.Toplevel(self.root);win.title('Select '+kind+' products');win.transient(self.root);win.grab_set();win.geometry('940x620')
+        win=tk.Toplevel(self.root);win.title('Select '+kind+' products');win.transient(self.root);win.grab_set();win.geometry('980x665');win.minsize(720,480)
+        # Pack fixed footer first so Save is always visible at reduced sizes / 150% DPI.
+        footer=ttk.Frame(win,padding=(12,10));footer.pack(side='bottom',fill='x')
+        content=ttk.Frame(win,padding=(10,7));content.pack(side='top',fill='both',expand=True)
         search=tk.StringVar();qty=tk.StringVar(value='1');unit=tk.StringVar()
-        ttk.Label(win,text='Search name or SKU').pack(anchor='w',padx=12,pady=4)
-        ttk.Entry(win,textvariable=search).pack(fill='x',padx=12)
-        catalog=ttk.Treeview(win,columns=('SKU','Product','Catalog','Customer','Stock'),show='headings',height=10)
+        ttk.Label(content,text='Search name or SKU').pack(anchor='w',padx=12,pady=4)
+        ttk.Entry(content,textvariable=search).pack(fill='x',padx=12)
+        catalog=ttk.Treeview(content,columns=('SKU','Product','Catalog','Customer','Stock'),show='headings',height=5)
         for col,width in [('SKU',130),('Product',320),('Catalog',100),('Customer',105),('Stock',75)]:
             catalog.heading(col,text=col);catalog.column(col,width=width)
         catalog.pack(fill='both',expand=True,padx=12,pady=8)
-        controls=ttk.Frame(win,padding=8);controls.pack(fill='x')
+        controls=ttk.Frame(content,padding=(6,2));controls.pack(fill='x')
         ttk.Label(controls,text='Quantity').pack(side='left')
         ttk.Entry(controls,textvariable=qty,width=7).pack(side='left',padx=5)
         ttk.Label(controls,text='Unit price ($)').pack(side='left')
         ttk.Entry(controls,textvariable=unit,width=12).pack(side='left',padx=5)
-        lines=ttk.Treeview(win,columns=('SKU','Product','Qty','Unit','Total'),show='headings',height=6)
+        operations=ResponsiveToolbar(content)
+        operations.pack(fill='x',pady=(1,3))
+        lines=ttk.Treeview(content,columns=('SKU','Product','Qty','Unit','Total'),show='headings',height=4)
         for col,width in [('SKU',125),('Product',325),('Qty',75),('Unit',100),('Total',100)]:
             lines.heading(col,text=col);lines.column(col,width=width)
         lines.pack(fill='both',expand=True,padx=12,pady=8)
@@ -401,12 +436,12 @@ class BusinessDesk(BaseApp):
         catalog.bind('<<TreeviewSelect>>',product_selected)
         catalog.bind('<Double-1>',lambda _:add())
         lines.bind('<<TreeviewSelect>>',row_selected)
-        ttk.Button(controls,text='Add product',command=add).pack(side='left',padx=5)
-        ttk.Button(controls,text='Update selected line',command=change).pack(side='left',padx=5)
-        ttk.Button(controls,text='Remove line',command=remove).pack(side='left',padx=5)
-        actions=ttk.Frame(win,padding=10);actions.pack(fill='x')
-        ttk.Button(actions,text='Cancel',command=win.destroy).pack(side='right',padx=5)
-        ttk.Button(actions,text='Save line items',command=done).pack(side='right',padx=5)
+        operations.add_action('Add product',add)
+        operations.add_action('Update selected line',change)
+        operations.add_action('Remove line',remove)
+        ttk.Button(footer,text='Cancel',command=win.destroy).pack(side='right',padx=5)
+        ttk.Button(footer,text=f'Save {kind}',style='Accent.TButton',command=done).pack(side='right',padx=5)
+        ttk.Label(footer,text='Prices and quantities can be edited above before saving.').pack(side='left')
         win.wait_window();return out['items']
 
     def dashboard(self,p):
@@ -440,36 +475,55 @@ class BusinessDesk(BaseApp):
         ttk.Button(p,text='Refresh overview',style='Accent.TButton',command=self.home).pack(anchor='w',pady=(2,10))
 
     def customers(self,p):
-        bar=ttk.Frame(p);bar.pack(fill='x')
-        tree=self.table(p,('ID','Name','Email','Phone','Address','Tax-exempt','Notes'))
+        bar=ResponsiveToolbar(p);bar.pack(fill='x')
+        tree=self.table(p,('ID','Name','Email','Phone','Street address','City','State','ZIP','Tax-exempt','Notes'))
         def refresh():
             tree.delete(*tree.get_children())
             for r in self.db.execute('SELECT * FROM customers ORDER BY name'):
                 tree.insert('','end',values=(r['id'],r['name'],r['email'] or '',r['phone'] or '',
-                    r['address'] or '','Yes' if r['tax_exempt'] else 'No',r['notes'] or ''))
+                    r['address'] or '',r['city'] or '',r['state'] or '',r['zip_code'] or '',
+                    'Yes' if r['tax_exempt'] else 'No',r['notes'] or ''))
         def edit(new=False):
             cid=None if new else self.selected(tree)
             record={} if new else dict(self.db.execute('SELECT * FROM customers WHERE id=?',(cid,)).fetchone())
-            win=tk.Toplevel(self.root);win.title('Customer');win.transient(self.root);win.grab_set()
+            win=tk.Toplevel(self.root);win.title('New customer' if new else 'Edit customer')
+            win.transient(self.root);win.grab_set();win.geometry('680x530');win.minsize(510,450)
+            # Footer stays visible even when text fields grow under Windows display scaling.
+            footer=ttk.Frame(win,padding=(12,10));footer.pack(side='bottom',fill='x')
+            body=ttk.Frame(win,padding=(15,12));body.pack(side='top',fill='both',expand=True)
+            body.columnconfigure(1,weight=1)
             fields={}
-            for index,key in enumerate(('name','email','phone','address','notes')):
-                ttk.Label(win,text=key.title()).grid(row=index,column=0,padx=12,pady=7,sticky='w')
+            specs=(('name','Customer / company name'),('email','Email'),('phone','Phone'),
+                   ('address','Street address'),('city','City'),('state','State'),
+                   ('zip_code','ZIP / Postal code'),('notes','Notes'))
+            for index,(key,label) in enumerate(specs):
+                ttk.Label(body,text=label).grid(row=index,column=0,padx=(0,12),pady=5,sticky='w')
                 variable=tk.StringVar(value=str(record.get(key) or ''))
-                ttk.Entry(win,textvariable=variable,width=43).grid(row=index,column=1,padx=12,pady=7)
+                ttk.Entry(body,textvariable=variable).grid(row=index,column=1,pady=5,sticky='ew')
                 fields[key]=variable
             tax_exempt=tk.BooleanVar(value=bool(record.get('tax_exempt',0)))
-            ttk.Checkbutton(win,text='Tax-exempt customer',variable=tax_exempt).grid(row=5,column=0,columnspan=2,pady=5)
-            ttk.Label(win,text='Verify a valid exemption certificate and applicable tax rules.').grid(row=6,column=0,columnspan=2,pady=5)
+            ttk.Checkbutton(body,text='Tax-exempt customer',variable=tax_exempt).grid(
+                row=8,column=0,columnspan=2,sticky='w',pady=(7,3))
+            ttk.Label(body,text='Verify exemption documents and local tax rules.',wraplength=430).grid(
+                row=9,column=0,columnspan=2,sticky='w')
             def save():
-                vals=[fields[k].get().strip() for k in ('name','email','phone','address','notes')]
-                if not vals[0]:
+                keys=tuple(k for k,_ in specs)
+                values=[fields[k].get().strip() for k in keys]
+                if not fields['name'].get().strip():
                     messagebox.showerror('Customer','Name is required.',parent=win);return
+                if len(fields['state'].get().strip())>60 or len(fields['zip_code'].get().strip())>24:
+                    messagebox.showerror('Customer','State or ZIP field is too long.',parent=win);return
                 with self.db:
-                    if new:self.db.execute('INSERT INTO customers(name,email,phone,address,notes,tax_exempt) VALUES(?,?,?,?,?,?)',(*vals,int(tax_exempt.get())))
-                    else:self.db.execute('UPDATE customers SET name=?,email=?,phone=?,address=?,notes=?,tax_exempt=? WHERE id=?',(*vals,int(tax_exempt.get()),cid))
+                    if new:
+                        self.db.execute("""INSERT INTO customers(name,email,phone,address,city,state,zip_code,notes,tax_exempt)
+                                           VALUES(?,?,?,?,?,?,?,?,?)""",(*values,int(tax_exempt.get())))
+                    else:
+                        self.db.execute("""UPDATE customers SET name=?,email=?,phone=?,address=?,city=?,state=?,zip_code=?,
+                                           notes=?,tax_exempt=? WHERE id=?""",(*values,int(tax_exempt.get()),cid))
                 win.destroy();refresh()
-            ttk.Button(win,text='Save',command=save).grid(row=7,column=1,pady=12,sticky='e')
-            ttk.Button(win,text='Cancel',command=win.destroy).grid(row=7,column=0,pady=12)
+            ttk.Button(footer,text='Cancel',command=win.destroy).pack(side='right',padx=5)
+            ttk.Button(footer,text='Save customer',style='Accent.TButton',command=save).pack(side='right',padx=5)
+            win.bind('<Escape>',lambda _:win.destroy())
             win.wait_window()
         self.register_home_action('customer.add',lambda:edit(True))
         self.register_home_action('customer.edit',edit,tree)
@@ -593,7 +647,7 @@ class BusinessDesk(BaseApp):
         self.home()
 
     def products(self,p):
-        bar=ttk.Frame(p);bar.pack(fill='x')
+        bar=ResponsiveToolbar(p);bar.pack(fill='x')
         search=tk.StringVar()
         ttk.Label(bar,text='Search SKU / barcode / product:').pack(side='left',padx=3)
         ttk.Entry(bar,textvariable=search,width=26).pack(side='left',padx=4)
@@ -695,7 +749,7 @@ class BusinessDesk(BaseApp):
         for container in p.winfo_children():
             for widget in container.winfo_children():
                 if isinstance(widget,ttk.Button) and widget.cget('text')=='Record payment':widget.destroy()
-        bar=ttk.Frame(p);bar.pack(fill='x')
+        bar=ResponsiveToolbar(p);bar.pack(fill='x')
         # core creates a table; locate it by traversing the tab
         def find_tree(widget):
             if isinstance(widget,ttk.Treeview):return widget
@@ -867,7 +921,7 @@ class BusinessDesk(BaseApp):
         return result['items']
 
     def purchase_orders(self,p):
-        bar=ttk.Frame(p);bar.pack(fill='x')
+        bar=ResponsiveToolbar(p);bar.pack(fill='x')
         tree=self.table(p,('ID','Supplier','Ordered','Status','Total'))
         def refresh():
             tree.delete(*tree.get_children())
@@ -926,7 +980,7 @@ class BusinessDesk(BaseApp):
         ttk.Label(p,text='Receiving a PO increases inventory and records an accounts payable liability. Partial receiving and vendor payment are not yet supported.').pack(anchor='w')
         refresh()
     def accounting(self,p):
-        bar=ttk.Frame(p);bar.pack(fill='x')
+        bar=ResponsiveToolbar(p);bar.pack(fill='x')
         tree=self.table(p,('Date','Account','Debit','Credit','Memo','Source'))
         def refresh():
             tree.delete(*tree.get_children())
@@ -956,15 +1010,43 @@ class BusinessDesk(BaseApp):
         self.button(bar,'Export ledger CSV',lambda:self.export('SELECT j.posted_on,l.account,l.debit/100.0 AS debit,l.credit/100.0 AS credit,j.memo,j.source_type,j.source_id FROM journal j JOIN journal_lines l ON l.journal_id=j.id ORDER BY j.id,l.id'))
         ttk.Label(p,text='Journal includes v2 PO receipts, manual entries, and v2 transactions. Pre-existing v1 transactions are NOT automatically backfilled.').pack(anchor='w')
         refresh()
+    def reports(self,p):
+        ttk.Label(p,text='Business reports',style='Section.TLabel').pack(anchor='w',pady=(5,12))
+        reports=(
+            ('Sales by month',"SELECT substr(created,1,7) AS month,count(*) AS invoices,sum(total)/100.0 AS billed FROM documents WHERE kind='Invoice' GROUP BY substr(created,1,7) ORDER BY month"),
+            ('Payments by month',"SELECT substr(paid_on,1,7) AS month,sum(amount)/100.0 AS received FROM payments GROUP BY substr(paid_on,1,7) ORDER BY month"),
+            ('Expenses by category',"SELECT category,sum(amount)/100.0 AS spent FROM expenses GROUP BY category ORDER BY spent DESC"),
+            ('Low stock (5 or fewer)',"SELECT sku,name,qty FROM products WHERE qty<=5 ORDER BY qty,name"),
+            ('Invoice balances',"SELECT d.id,c.name AS customer,d.created,d.total/100.0 AS total,coalesce(sum(p.amount),0)/100.0 AS paid,(d.total-coalesce(sum(p.amount),0))/100.0 AS balance FROM documents d JOIN customers c ON c.id=d.customer_id LEFT JOIN payments p ON p.document_id=d.id WHERE d.kind='Invoice' GROUP BY d.id ORDER BY d.id DESC"),
+        )
+        for name,sql in reports:
+            panel=ttk.Frame(p,padding=(10,8));panel.pack(fill='x',pady=3)
+            ttk.Label(panel,text=name,font=('Segoe UI',11,'bold')).pack(anchor='w',pady=(0,5))
+            buttons=ResponsiveToolbar(panel);buttons.pack(fill='x')
+            self.button(buttons,'Export CSV',lambda q=sql:self.export(q))
+            self.button(buttons,'Export branded PDF',lambda title=name,q=sql:self.export_report_pdf(title,q))
+        ttk.Label(p,text='PDF reports use the business name, logo, address and contact information saved in Settings / Updates.',
+                  wraplength=850).pack(anchor='w',pady=12)
+
+    def export_report_pdf(self,title,sql):
+        filename=re.sub(r'[^A-Za-z0-9_-]+','_',title).strip('_')+'.pdf'
+        path=filedialog.asksaveasfilename(title='Save branded report as PDF',initialfile=filename,
+            defaultextension='.pdf',filetypes=[('PDF documents','*.pdf')])
+        if not path:return
+        export_report_pdf(self.db,title,sql,path)
+        messagebox.showinfo('Report saved','Branded report PDF saved to:\n'+path)
+
     def admin(self,p):
+        p=scrollable_page(p)
         super().admin(p)
         if self.user and self.user['role']=='admin':
             ttk.Separator(p).pack(fill='x',pady=16)
             ttk.Label(p,text='Database management',font=('Segoe UI',14,'bold')).pack(anchor='w',pady=6)
             ttk.Label(p,text='Archive the entire current database to a separate file and start with a fresh database.\\n'
                 'The signed-in administrator login and business branding are retained; transactions, products, customers, and other employee accounts are reset.',
-                wraplength=800).pack(anchor='w',pady=6)
-            self.button(p,'Archive current database and create new',self.new_database)
+                wraplength=650).pack(anchor='w',pady=6)
+            archive_actions=ResponsiveToolbar(p);archive_actions.pack(fill='x')
+            self.button(archive_actions,'Archive current database and create new',self.new_database)
 
     def new_database(self):
         """Archive live SQLite database then atomically switch to an empty database."""
@@ -1049,6 +1131,7 @@ class BusinessDesk(BaseApp):
         open_visual_template_editor(self.root,self.db,DATA)
 
     def settings_tab(self,p):
+        p=scrollable_page(p)
         ttk.Label(p,text='TDZIGNS LLC | Branding and updates',font=('Segoe UI',17,'bold')).pack(anchor='w',pady=10)
         if self.user['role']!='admin':
             ttk.Label(p,text='Administrator access required.').pack(anchor='w');return
@@ -1063,51 +1146,55 @@ class BusinessDesk(BaseApp):
             if not path:return
             dest=DATA/('business_logo'+Path(path).suffix.lower());shutil.copy2(path,dest)
             with self.db:self.db.execute('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)',('logo_path',str(dest)))
-        self.button(p,'Edit business details',branding);self.button(p,'Choose company logo',logo)
+        brand_bar=ResponsiveToolbar(p);brand_bar.pack(fill='x')
+        self.button(brand_bar,'Edit business details',branding);self.button(brand_bar,'Choose company logo',logo)
         ttk.Separator(p).pack(fill='x',pady=12)
         ttk.Label(p,text='Document templates',font=('Segoe UI',12,'bold')).pack(anchor='w',pady=5)
-        ttk.Label(p,text='Design custom estimate, invoice, and PO PDFs by dragging objects onto the page. Preview, save, or use classic settings.',wraplength=850).pack(anchor='w')
-        self.button(p,'Open Visual Template Designer',self.edit_document_templates)
+        ttk.Label(p,text='Design custom estimate, invoice, and PO PDFs by dragging objects onto the page. Preview, save, or use classic settings.',wraplength=650).pack(anchor='w')
+        template_bar=ResponsiveToolbar(p);template_bar.pack(fill='x')
+        self.button(template_bar,'Open Visual Template Designer',self.edit_document_templates)
         def restore_classic():
             from visual_templates import reset as reset_visual
             if not messagebox.askyesno('Use classic PDF templates',
                 'Switch estimate, invoice and PO exports back to classic templates? Saved visual designs will be removed.'):return
             for kind in ('Estimate','Invoice','PO'):reset_visual(self.db,kind)
             messagebox.showinfo('Classic templates active','Classic document template settings are active again.')
-        self.button(p,'Edit classic template settings',lambda:open_template_editor(self.root,self.db,DATA))
-        self.button(p,'Use classic PDF layouts',restore_classic)
+        self.button(template_bar,'Edit classic template settings',lambda:open_template_editor(self.root,self.db,DATA))
+        self.button(template_bar,'Use classic PDF layouts',restore_classic)
         ttk.Separator(p).pack(fill='x',pady=16)
         ttk.Label(p,text=f'Installed version: {VERSION}').pack(anchor='w')
         row=self.db.execute('SELECT * FROM update_settings WHERE id=1').fetchone()
         url=tk.StringVar(value=row['manifest_url'] or RELEASE_MANIFEST_URL);auto=tk.BooleanVar(value=bool(row['check_at_launch']))
         ttk.Label(p,text='GitHub Releases update feed (configured automatically; advanced users may change it)').pack(anchor='w',pady=4)
-        ttk.Entry(p,textvariable=url,width=90).pack(anchor='w',pady=4)
+        ttk.Entry(p,textvariable=url).pack(fill='x',pady=4)
         ttk.Checkbutton(p,text='Check for updates at sign-in (requires internet)',variable=auto).pack(anchor='w',pady=6)
         def save():
             if url.get().strip() and not url.get().strip().lower().startswith('https://'):raise ValueError('Use an HTTPS manifest URL.')
             with self.db:self.db.execute('UPDATE update_settings SET manifest_url=?,check_at_launch=? WHERE id=1',(url.get().strip(),int(auto.get())))
             messagebox.showinfo('Saved','Update preferences saved.')
-        self.button(p,'Save update settings',save)
+        settings_bar=ResponsiveToolbar(p);settings_bar.pack(fill='x')
+        self.button(settings_bar,'Save update settings',save)
         installed=Path(sys.executable).resolve() if getattr(sys,'frozen',False) else Path(__file__).resolve()
-        ttk.Label(p,text='Application location: '+str(installed),wraplength=900).pack(anchor='w',pady=5)
+        ttk.Label(p,text='Application location: '+str(installed),wraplength=650).pack(anchor='w',pady=5)
         if getattr(sys,'frozen',False) and sys.platform=='win32':
             install_target,is_temporary=choose_install_target(installed,os.environ.get('LOCALAPPDATA',str(DATA.parent)),os.environ.get('TEMP',''))
             if is_temporary:
                 ttk.Label(p,text='WARNING: Running from a temporary ZIP folder. The next update will install BusinessDesk permanently at:\n'+install_target,
-                    foreground='#B45309',wraplength=900).pack(anchor='w',pady=7)
+                    foreground='#B45309',wraplength=650).pack(anchor='w',pady=7)
 
         last=read_status(DATA)
         if last:
             state=last.get('status','unknown')
             detail=last.get('message','')
-            ttk.Label(p,text=f'Last update: {state} — {detail}',wraplength=900).pack(anchor='w',pady=4)
-        self.button(p,'Open application folder',self.open_application_folder)
-        self.button(p,'Open update log',self.open_update_log)
-        self.button(p,'Check GitHub for updates',lambda:self.check_updates(url.get().strip() or RELEASE_MANIFEST_URL))
-        self.button(p,'Install local Windows Setup or update ZIP',self.choose_local_update)
-        self.button(p,'Select update folder',self.choose_update_folder)
+            ttk.Label(p,text=f'Last update: {state} — {detail}',wraplength=650).pack(anchor='w',pady=4)
+        update_bar=ResponsiveToolbar(p);update_bar.pack(fill='x')
+        self.button(update_bar,'Open application folder',self.open_application_folder)
+        self.button(update_bar,'Open update log',self.open_update_log)
+        self.button(update_bar,'Check GitHub for updates',lambda:self.check_updates(url.get().strip() or RELEASE_MANIFEST_URL))
+        self.button(update_bar,'Install local Windows Setup or update ZIP',self.choose_local_update)
+        self.button(update_bar,'Select update folder',self.choose_update_folder)
 
-        ttk.Label(p,text='Check GitHub for the latest release and install its verified Windows Setup package. Setup registers BusinessDesk in Windows Installed Apps and preserves your separate business database. Older releases can still use ZIP updates.',wraplength=850).pack(anchor='w',pady=12)
+        ttk.Label(p,text='Check GitHub for the latest release and install its verified Windows Setup package. Setup registers BusinessDesk in Windows Installed Apps and preserves your separate business database. Older releases can still use ZIP updates.',wraplength=650).pack(anchor='w',pady=12)
     def open_application_folder(self):
         path=Path(sys.executable if getattr(sys,'frozen',False) else __file__).resolve().parent
         if sys.platform=='win32':os.startfile(str(path))

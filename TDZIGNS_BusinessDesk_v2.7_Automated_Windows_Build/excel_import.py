@@ -14,6 +14,9 @@ HEADERS = {
         'phone': ('phone','phone number','telephone','mobile'),
         'address': ('address','street address','mailing address'),
         'notes': ('notes','comments','remarks'),
+        'city': ('city','town'),
+        'state': ('state','province','state province','region'),
+        'zip_code': ('zip','zip code','zipcode','postal code','postcode','postal'),
     },
     'suppliers': {
         'name': ('name','supplier name','supplier','vendor','vendor name','company','company name','business name'),
@@ -64,7 +67,7 @@ def parse(kind, values):
         name=val('name')
         if not name:raise ValueError("Customer name required")
         result=dict(name=name,email=val('email'),phone=val('phone'),address=val('address'))
-        if kind=='customers':result['notes']=val('notes')
+        if kind=='customers':result.update(notes=val('notes'),city=val('city'),state=val('state'),zip_code=val('zip_code'))
         return result
     sku=val('sku');name=val('name')
     if not sku or not name:raise ValueError("SKU and product name required")
@@ -120,14 +123,17 @@ def import_rows(db,kind,rows,mode='skip'):
                 existing=db.execute(f"SELECT id FROM {table} WHERE name=? COLLATE NOCASE",(v['name'],)).fetchone()
                 if existing:
                     if mode=='skip':skipped+=1;continue
-                    db.execute(f"UPDATE {table} SET email=?,phone=?,address=?"+(",notes=?" if kind=="customers" else "")+" WHERE id=?",
-                               (v['email'],v['phone'],v['address'],v['notes'],existing[0]) if kind=="customers"
-                               else (v['email'],v['phone'],v['address'],existing[0]))
+                    if kind=='customers':
+                        db.execute("""UPDATE customers SET email=?,phone=?,address=?,notes=?,city=?,state=?,zip_code=? WHERE id=?""",
+                                   (v['email'],v['phone'],v['address'],v['notes'],v['city'],v['state'],v['zip_code'],existing[0]))
+                    else:
+                        db.execute("UPDATE suppliers SET email=?,phone=?,address=? WHERE id=?",
+                                   (v['email'],v['phone'],v['address'],existing[0]))
                     updated+=1
                 else:
                     if kind=='customers':
-                        db.execute("INSERT INTO customers(name,email,phone,address,notes) VALUES(?,?,?,?,?)",
-                                   (v['name'],v['email'],v['phone'],v['address'],v['notes']))
+                        db.execute("INSERT INTO customers(name,email,phone,address,notes,city,state,zip_code) VALUES(?,?,?,?,?,?,?,?)",
+                                   (v['name'],v['email'],v['phone'],v['address'],v['notes'],v['city'],v['state'],v['zip_code']))
                     else:
                         db.execute("INSERT INTO suppliers(name,email,phone,address) VALUES(?,?,?,?)",
                                    (v['name'],v['email'],v['phone'],v['address']))

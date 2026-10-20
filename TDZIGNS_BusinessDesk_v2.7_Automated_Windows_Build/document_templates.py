@@ -114,6 +114,7 @@ def _settings(db):
 
 def render_document(db, kind: str, record_id: int, output, template_override=None, preview=False):
     """Render saved records or preview data. Monetary totals always come from saved rows."""
+    from address_utils import customer_address
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import letter, A4
     from reportlab.lib.styles import ParagraphStyle
@@ -164,13 +165,14 @@ def render_document(db, kind: str, record_id: int, output, template_override=Non
                   'tax':0,'total':doc['total'],'number':record_id,
                   'rows':[(r['name'],r['qty'],r['unit_cost'],r['qty']*r['unit_cost']) for r in items]}
     else:
-        doc=db.execute('''SELECT d.*,c.name,c.address,c.email FROM documents d
+        postal=',c.city,c.state,c.zip_code' if {'city','state','zip_code'} <= {r[1] for r in db.execute('PRAGMA table_info(customers)')} else ",' ' AS city,' ' AS state,' ' AS zip_code"
+        doc=db.execute(f'''SELECT d.*,c.name,c.address,c.email,{postal.lstrip(',')} FROM documents d
                           JOIN customers c ON c.id=d.customer_id WHERE d.id=?''',(record_id,)).fetchone()
         if not doc:raise ValueError('Document not found')
         if doc['kind']!=kind:raise ValueError('Document type mismatch')
         items=db.execute('''SELECT description,qty,unit_price,line_total FROM document_items
                             WHERE document_id=? ORDER BY id''',(record_id,)).fetchall()
-        metadata={'name':doc['name'],'address':doc['address'],'email':doc['email'],
+        metadata={'name':doc['name'],'address':customer_address(doc['address'],doc['city'],doc['state'],doc['zip_code']),'email':doc['email'],
                   'date':doc['created'],'notes':doc['notes'],'subtotal':doc['subtotal'],
                   'tax':doc['tax'],'total':doc['total'],'number':record_id,
                   'rows':[(r['description'],r['qty'],r['unit_price'],r['line_total']) for r in items]}
