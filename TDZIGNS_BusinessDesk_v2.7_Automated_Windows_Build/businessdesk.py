@@ -11,6 +11,7 @@ from tkinter import ttk, messagebox, filedialog, simpledialog
 from core_v1 import App as BaseApp, DB, DATA, cents, money
 from sales_workflow import convert_estimate, record_invoice_payment
 from supplier_catalog import supplier_choices, products_for_supplier, create_supplier_po, validate_supplier_rows
+from po_editor import open_purchase_order_editor
 from update_support import read_status, signal_ready, STATUS_NAME
 from install_location import choose_install_target, is_temporary_install
 from release_layout import valid_release_names, inspect_release
@@ -21,7 +22,7 @@ from visual_templates import load as load_visual_template, render as render_visu
 from visual_template_editor import open_visual_template_editor
 from modern_theme import apply as apply_modern_theme
 
-VERSION = '2.9.9'
+VERSION = '2.9.10'
 BUSINESS = 'TDZIGNS LLC'
 RELEASE_MANIFEST_URL = 'https://github.com/combatengineer88/BusinessDesk/releases/latest/download/update_manifest.json'
 TRUSTED_RELEASE_PREFIX = 'https://github.com/combatengineer88/BusinessDesk/releases/download/'
@@ -765,15 +766,18 @@ class BusinessDesk(BaseApp):
             with self.db:self.db.execute('INSERT INTO suppliers(name,email,phone,address) VALUES(?,?,?,?)',tuple(v.values()))
             messagebox.showinfo('Supplier added','Supplier saved.')
         def create():
-            selection=self.select_po_supplier()
-            if not selection:return
-            supplier_id=selection['supplier_id']
-            items=self.select_po_products(supplier_id)
-            if not items:return
-            po_id=create_supplier_po(self.db,supplier_id,selection['notes'],items,
-                                     datetime.now().strftime('%Y-%m-%d'))
-            messagebox.showinfo('Purchase order created',f'Purchase order #{po_id} saved for the selected supplier.')
-            refresh()
+            po_id=open_purchase_order_editor(self.root,self.db)
+            if po_id is not None:
+                refresh()
+                messagebox.showinfo('Purchase order saved',
+                    f'Purchase order #{po_id} was saved successfully.',parent=self.root)
+        def edit():
+            po_id=self.selected(tree)
+            updated=open_purchase_order_editor(self.root,self.db,po_id=po_id)
+            if updated is not None:
+                refresh()
+                messagebox.showinfo('Purchase order updated',
+                    f'Purchase order #{updated} was saved successfully.',parent=self.root)
         def receive():
             id=self.selected(tree)
             row=self.db.execute('SELECT * FROM purchase_orders WHERE id=?',(id,)).fetchone()
@@ -792,8 +796,11 @@ class BusinessDesk(BaseApp):
             path=filedialog.asksaveasfilename(defaultextension='.pdf',initialfile=f'PO_{id}.pdf',filetypes=[('PDF','*.pdf')])
             if path:make_pdf(self.db,'PO',id,path);messagebox.showinfo('Saved','Purchase order PDF exported.')
         self.button(bar,'Add supplier',supplier);self.button(bar,'New PO',create)
+        self.button(bar,'Edit selected PO',edit)
+        tree.bind('<Double-1>',lambda event:self.safe(edit))
         self.button(bar,'Receive entire PO',receive);self.button(bar,'Export PO PDF',pdf)
         if self.user['role']=='admin':self.button(bar,'Customize PO template',self.edit_document_templates)
+        ttk.Label(p,text='Use New PO to build and save an order; use Edit selected PO to correct items, quantities, costs, or notes while the order is Open. Received orders cannot be edited.').pack(anchor='w')
         ttk.Label(p,text='Receiving a PO increases inventory and records an accounts payable liability. Partial receiving and vendor payment are not yet supported.').pack(anchor='w')
         refresh()
     def accounting(self,p):

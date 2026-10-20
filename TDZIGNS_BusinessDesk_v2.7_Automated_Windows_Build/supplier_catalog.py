@@ -59,3 +59,50 @@ def create_supplier_po(db, supplier_id, notes, items, ordered_on=None):
         db.executemany('INSERT INTO po_items(po_id,product_id,qty,unit_cost) VALUES(?,?,?,?)',
                        [(cursor.lastrowid, *item) for item in items])
     return cursor.lastrowid
+
+
+def update_supplier_po(db, po_id, notes, items):
+    """Atomically replace line items on an OPEN purchase order.
+
+    Receiving posts inventory and an accounting journal, so received orders
+    cannot be changed. Existing lines remain editable if their product has
+    since been reassigned to another supplier; new lines must belong to the
+    PO supplier.
+    """
+    if not isinstance(notes, str):
+        raise ValueError('Purchase order notes must be text.')
+    if not items:
+        raise ValueError('A purchase order must contain at least one product.')
+    with db:
+        po = db.execute('SELECT supplier_id,status FROM purchase_orders WHERE id=?',
+                        (po_id,)).fetchone()
+        if po is None:
+            raise ValueError('Purchase order no longer exists.')
+        if po['status'] != 'Open':
+            raise ValueError('Only open purchase orders may be edited. Received POs have already affected inventory and accounting.')
+        supplier_id = po['supplier_id']
+        originals = {row[0] for row in db.execute(
+            'SELECT product_id FROM po_items WHERE po_id=?', (po_id,))}
+        seen = set()
+        total = 0
+        for product_id, quantity, cost in items:
+            if (type(product_id) is not int or type(quantity) is not int
+                    or quantity <= 0 or type(cost) is not int or cost < 0):
+                raise ValueError('Quantities must be positive whole numbers; costs must be nonnegative.')
+            if product_id in seen:
+                raise ValueError('A product can only appear once on a purchase order.')
+            seen.add(product_id)
+            product = db.execute('SELECT supplier_id FROM products WHERE id=?',
+                                 (product_id,)).fetchone()
+            if product is None:
+                raise ValueError('A product on this purchase order no longer exists.')
+            if product['supplier_id'] != supplier_id and product_id not in originals:
+                raise ValueError(f'Product #{product_id} is not assigned to this supplier.')
+            total += quantity * cost
+        db.execute('DELETE FROM po_items WHERE po_id=?', (po_id,))
+        db.executemany(
+            'INSERT INTO po_items(po_id,product_id,qty,unit_cost) VALUES(?,?,?,?)',
+            [(po_id, *line) for line in items])
+        db.execute('UPDATE purchase_orders SET notes=?,total=? WHERE id=? AND status=\'Open\'',
+                   (notes, total, po_id))
+    return po_id

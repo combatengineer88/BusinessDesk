@@ -3,7 +3,7 @@ from pathlib import Path
 import hashlib, json, zipfile
 from release_layout import valid_release_names
 
-VERSION = "2.9.9"
+VERSION = "2.9.10"
 REPOSITORY = "combatengineer88/BusinessDesk"
 DIST = Path('dist/TDZIGNS_BusinessDesk')
 EXE = DIST / 'TDZIGNS_BusinessDesk.exe'
