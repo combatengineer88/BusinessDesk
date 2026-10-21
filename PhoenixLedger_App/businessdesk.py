@@ -24,8 +24,11 @@ from modern_theme import apply as apply_modern_theme
 from home_workspace import HomeWorkspace
 from responsive_ui import ResponsiveToolbar, scrollable_page
 from report_export import export_report_pdf
+from account_workflows import (ensure_schema as ensure_account_schema,receive_po,po_lines,po_balance,
+    po_received_value,record_supplier_payment,credit_info,validate_credit_charge)
+from account_dialogs import receive_partial_dialog,supplier_payment_dialog,credit_manager_dialog
 
-VERSION = '3.0.1'
+VERSION = '3.1.0'
 BUSINESS = 'TDZIGNS LLC'
 RELEASE_MANIFEST_URL = 'https://github.com/combatengineer88/BusinessDesk/releases/latest/download/update_manifest.json'
 TRUSTED_RELEASE_PREFIX = 'https://github.com/combatengineer88/BusinessDesk/releases/download/'
@@ -125,6 +128,7 @@ def schema(db):
       VALUES((SELECT id FROM journal WHERE source_type='expense' AND source_id=NEW.id),'Cash',0,NEW.amount);
     END;
     """)
+    ensure_account_schema(db)
     db.commit()
 
 
@@ -319,8 +323,10 @@ class PhoenixLedger(BaseApp):
         targets={
             'supplier.add':'Purchase Orders','supplier.import':'Purchase Orders',
             'po.new':'Purchase Orders','po.edit':'Purchase Orders','po.receive':'Purchase Orders',
+            'po.partial':'Purchase Orders','supplier.payment':'Purchase Orders',
             'customer.add':'Customers','customer.import':'Customers',
             'customer.edit':'Customers','customer.pricing':'Customers',
+            'customer.credit':'Customers',
             'estimate.new':'Estimates / Invoices','estimate.convert':'Estimates / Invoices',
             'invoice.payment':'Estimates / Invoices',
             'product.add':'Products','product.import':'Products','product.edit':'Products',
@@ -559,10 +565,12 @@ class PhoenixLedger(BaseApp):
         self.register_home_action('customer.add',lambda:edit(True))
         self.register_home_action('customer.edit',edit,tree)
         self.register_home_action('customer.pricing',lambda:self.customer_price_manager(self.selected(tree)),tree)
+        self.register_home_action('customer.credit',lambda:self.customer_credit_manager(self.selected(tree)),tree)
         self.register_home_action('customer.import',lambda:self.import_excel_dialog('customers'))
         self.button(bar,'Add customer',lambda:edit(True))
         self.button(bar,'Edit selected',edit)
         self.button(bar,'Customer product prices',lambda:self.customer_price_manager(self.selected(tree)))
+        self.button(bar,'Credit account',lambda:self.customer_credit_manager(self.selected(tree)))
         self.button(bar,'Import customers from Excel',lambda:self.import_excel_dialog('customers'))
         refresh()
 
@@ -609,6 +617,9 @@ class PhoenixLedger(BaseApp):
         ttk.Button(bottom,text='Close',command=win.destroy).pack(side='right')
         refresh();win.wait_window()
 
+    def customer_credit_manager(self,customer_id):
+        credit_manager_dialog(self.root,self.db,customer_id,self.form)
+
     def _safe(self,fn):
         try:fn()
         except Exception as exc:self.error(exc)
@@ -619,28 +630,36 @@ class PhoenixLedger(BaseApp):
         labels=[f"{c['name']} (ID {c['id']})" for c in customers]
         chosen=tk.StringVar(value=labels[0]);kind=tk.StringVar(value='Estimate')
         rate=tk.StringVar(value=self.setting('default_tax_rate') or '0');notes=tk.StringVar()
+        charge_credit=tk.BooleanVar(value=False)
         for index,label in enumerate(('Customer','Type','Tax rate (%)','Notes')):
             ttk.Label(win,text=label).grid(row=index,column=0,padx=12,pady=8,sticky='w')
         ttk.Combobox(win,values=labels,textvariable=chosen,state='readonly',width=42).grid(row=0,column=1,pady=8)
         ttk.Combobox(win,values=['Estimate','Invoice'],textvariable=kind,state='readonly').grid(row=1,column=1,sticky='w')
         rate_entry=ttk.Entry(win,textvariable=rate,width=14);rate_entry.grid(row=2,column=1,sticky='w')
         ttk.Entry(win,textvariable=notes,width=44).grid(row=3,column=1,pady=8)
-        status=ttk.Label(win,text='');status.grid(row=4,column=0,columnspan=2,pady=5)
+        credit_box=ttk.Checkbutton(win,text='Charge to customer credit account (invoice only)',variable=charge_credit)
+        credit_box.grid(row=4,column=1,sticky='w',pady=5)
+        status=ttk.Label(win,text='');status.grid(row=5,column=0,columnspan=2,pady=5)
         def is_exempt():
             cid=customers[labels.index(chosen.get())]['id']
             return bool(self.db.execute('SELECT tax_exempt FROM customers WHERE id=?',(cid,)).fetchone()[0])
         def refresh(*_):
             exempt=is_exempt()
             rate_entry.configure(state='disabled' if exempt else 'normal')
-            status.configure(text='Tax-exempt: sales tax will be $0.00' if exempt else 'Taxable customer')
-        chosen.trace_add('write',refresh);refresh()
+            cid=customers[labels.index(chosen.get())]['id']
+            info=credit_info(self.db,cid)
+            credit_box.configure(state='normal' if kind.get()=='Invoice' and info['enabled'] else 'disabled')
+            if kind.get()!='Invoice' or not info['enabled']:charge_credit.set(False)
+            tax_message='Tax-exempt: sales tax will be $0.00' if exempt else 'Taxable customer'
+            status.configure(text=tax_message+(f" | Available credit: {money(info['available'])}" if info['enabled'] else ''))
+        chosen.trace_add('write',refresh);kind.trace_add('write',refresh);refresh()
         result={'value':None}
         def done():
             cid=customers[labels.index(chosen.get())]['id']
-            result['value']={'customer':str(cid),'kind':kind.get(),'tax':'0' if is_exempt() else rate.get(),'notes':notes.get()}
+            result['value']={'customer':str(cid),'kind':kind.get(),'tax':'0' if is_exempt() else rate.get(),'notes':notes.get(),'credit_account':bool(charge_credit.get())}
             win.destroy()
-        ttk.Button(win,text='Continue to products',command=done).grid(row=5,column=1,sticky='e',padx=12,pady=12)
-        ttk.Button(win,text='Cancel',command=win.destroy).grid(row=5,column=0,sticky='w',padx=12)
+        ttk.Button(win,text='Continue to products',command=done).grid(row=6,column=1,sticky='e',padx=12,pady=12)
+        ttk.Button(win,text='Cancel',command=win.destroy).grid(row=6,column=0,sticky='w',padx=12)
         win.wait_window();return result['value']
 
     def import_excel_dialog(self,kind):
@@ -797,9 +816,18 @@ class PhoenixLedger(BaseApp):
             docid=self.selected(tree)
             kind=self.db.execute('SELECT kind FROM documents WHERE id=?',(docid,)).fetchone()['kind']
             if kind!='Estimate':raise ValueError('Select an Estimate row to convert.')
-            if not messagebox.askyesno('Convert estimate',f'Convert estimate #{docid} into an invoice? Stock will be deducted.'):
-                return
-            convert_estimate(self.db,docid)
+            cid=self.db.execute('SELECT customer_id FROM documents WHERE id=?',(docid,)).fetchone()[0]
+            if credit_info(self.db,cid)['enabled']:
+                choice=messagebox.askyesnocancel('Convert estimate',
+                    f'Convert estimate #{docid} into an invoice? Stock will be deducted.\n\n'
+                    'Yes: charge customer credit account\nNo: normal invoice\nCancel: do nothing.')
+                if choice is None:return
+                charge=bool(choice)
+            else:
+                if not messagebox.askyesno('Convert estimate',f'Convert estimate #{docid} into an invoice? Stock will be deducted.'):
+                    return
+                charge=False
+            convert_estimate(self.db,docid,charge_credit=charge)
             messagebox.showinfo('Converted',f'Estimate #{docid} is now invoice #{docid}. Select it and record a payment.')
             self.home()
         def pay_selected():
@@ -953,11 +981,12 @@ class PhoenixLedger(BaseApp):
 
     def purchase_orders(self,p):
         bar=ResponsiveToolbar(p);bar.pack(fill='x')
-        tree=self.table(p,('ID','Supplier','Ordered','Status','Total'))
+        tree=self.table(p,('ID','Supplier','Ordered','Status','Ordered total','Received value','Unpaid AP'))
         def refresh():
             tree.delete(*tree.get_children())
             for r in self.db.execute('SELECT p.*,s.name FROM purchase_orders p JOIN suppliers s ON s.id=p.supplier_id ORDER BY p.id DESC'):
-                tree.insert('','end',values=(r['id'],r['name'],r['ordered_on'],r['status'],money(r['total'])))
+                tree.insert('','end',values=(r['id'],r['name'],r['ordered_on'],r['status'],money(r['total']),
+                                              money(po_received_value(self.db,r['id'])),money(po_balance(self.db,r['id']))))
         self.button(bar,'Import suppliers from Excel',lambda:self.import_excel_dialog('suppliers'))
         def supplier():
             v=self.form('New supplier',[(x,x.title()) for x in ('name','email','phone','address')])
@@ -969,46 +998,48 @@ class PhoenixLedger(BaseApp):
             po_id=open_purchase_order_editor(self.root,self.db)
             if po_id is not None:
                 refresh()
-                messagebox.showinfo('Purchase order saved',
-                    f'Purchase order #{po_id} was saved successfully.',parent=self.root)
+                messagebox.showinfo('Purchase order saved',f'Purchase order #{po_id} saved.',parent=self.root)
         def edit():
             po_id=self.selected(tree)
             updated=open_purchase_order_editor(self.root,self.db,po_id=po_id)
             if updated is not None:
-                refresh()
-                messagebox.showinfo('Purchase order updated',
-                    f'Purchase order #{updated} was saved successfully.',parent=self.root)
-        def receive():
-            id=self.selected(tree)
-            row=self.db.execute('SELECT * FROM purchase_orders WHERE id=?',(id,)).fetchone()
-            if row['status']!='Open':raise ValueError('This purchase order has already been received.')
-            if not messagebox.askyesno('Receive stock','Receive all PO lines and record accounts payable?'):return
-            with self.db:
-                for x in self.db.execute('SELECT * FROM po_items WHERE po_id=?',(id,)).fetchall():
-                    self.db.execute('UPDATE products SET qty=qty+? WHERE id=?',(x['qty'],x['product_id']))
-                self.db.execute("UPDATE purchase_orders SET status='Received' WHERE id=?",(id,))
-                if row['total']:
-                    post_journal(self.db,datetime.now().strftime('%Y-%m-%d'),f'Purchase order #{id} received','po',id,
-                                 [('Inventory',row['total'],0),('Accounts Payable',0,row['total'])])
+                refresh();messagebox.showinfo('Purchase order updated',f'PO #{updated} saved.',parent=self.root)
+        def receive_partial():
+            po_id=self.selected(tree)
+            receive_partial_dialog(self.root,self.db,po_id)
             refresh()
+        def receive_entire():
+            po_id=self.selected(tree)
+            remaining={r['id']:r['qty']-r['received_qty'] for r in po_lines(self.db,po_id)}
+            if not any(remaining.values()):raise ValueError('Nothing remains to receive on this PO.')
+            if not messagebox.askyesno('Receive stock',f'Receive ALL remaining quantities on PO #{po_id}? Inventory and Accounts Payable will update.'):
+                return
+            _,status=receive_po(self.db,po_id,remaining)
+            refresh();messagebox.showinfo('Receipt saved',f'PO #{po_id} status: {status}.')
+        def supplier_payment():
+            po_id=self.selected(tree)
+            if supplier_payment_dialog(self.root,self.db,po_id,self.form):refresh()
         def pdf():
-            id=self.selected(tree)
-            path=filedialog.asksaveasfilename(defaultextension='.pdf',initialfile=f'PO_{id}.pdf',filetypes=[('PDF','*.pdf')])
-            if path:make_pdf(self.db,'PO',id,path);messagebox.showinfo('Saved','Purchase order PDF exported.')
+            po_id=self.selected(tree)
+            path=filedialog.asksaveasfilename(defaultextension='.pdf',initialfile=f'PO_{po_id}.pdf',filetypes=[('PDF','*.pdf')])
+            if path:make_pdf(self.db,'PO',po_id,path);messagebox.showinfo('Saved','Purchase order PDF exported.')
         self.register_home_action('supplier.add',supplier)
         self.register_home_action('supplier.import',lambda:self.import_excel_dialog('suppliers'))
         self.register_home_action('po.new',create)
-        self.register_home_action('po.edit',edit,tree,
-                                  lambda v:len(v)>3 and v[3]=='Open')
-        self.register_home_action('po.receive',receive,tree,
-                                  lambda v:len(v)>3 and v[3]=='Open')
-        self.button(bar,'Add supplier',supplier);self.button(bar,'New PO',create)
-        self.button(bar,'Edit selected PO',edit)
-        tree.bind('<Double-1>',lambda event:self.safe(edit))
-        self.button(bar,'Receive entire PO',receive);self.button(bar,'Export PO PDF',pdf)
+        self.register_home_action('po.edit',edit,tree,lambda v:len(v)>3 and v[3]=='Open')
+        self.register_home_action('po.receive',receive_entire,tree,lambda v:len(v)>3 and v[3] in ('Open','Partially Received'))
+        self.register_home_action('po.partial',receive_partial,tree,lambda v:len(v)>3 and v[3] in ('Open','Partially Received'))
+        self.register_home_action('supplier.payment',supplier_payment,tree,lambda v:len(v)>6 and v[6]!='$0.00')
+        self.button(bar,'Add supplier',supplier)
+        self.button(bar,'New PO',create);self.button(bar,'Edit selected PO',edit)
+        self.button(bar,'Receive entire PO',receive_entire)
+        self.button(bar,'Receive partial PO',receive_partial)
+        self.button(bar,'Pay supplier',supplier_payment)
+        self.button(bar,'Export PO PDF',pdf)
         if self.user['role']=='admin':self.button(bar,'Customize PO template',self.edit_document_templates)
-        ttk.Label(p,text='Use New PO to build and save an order; use Edit selected PO to correct items, quantities, costs, or notes while the order is Open. Received orders cannot be edited.').pack(anchor='w')
-        ttk.Label(p,text='Receiving a PO increases inventory and records an accounts payable liability. Partial receiving and vendor payment are not yet supported.').pack(anchor='w')
+        tree.bind('<Double-1>',lambda event:self.safe(edit))
+        ttk.Label(p,text='Partial receipts update stock and Accounts Payable for delivered goods only. '
+                  'Supplier payments reduce outstanding AP. POs with any receipts are locked from editing.',wraplength=900).pack(anchor='w')
         refresh()
     def accounting(self,p):
         bar=ResponsiveToolbar(p);bar.pack(fill='x')
@@ -1049,6 +1080,23 @@ class PhoenixLedger(BaseApp):
             ('Expenses by category',"SELECT category,sum(amount)/100.0 AS spent FROM expenses GROUP BY category ORDER BY spent DESC"),
             ('Low stock (5 or fewer)',"SELECT sku,name,qty FROM products WHERE qty<=5 ORDER BY qty,name"),
             ('Invoice balances',"SELECT d.id,c.name AS customer,d.created,d.total/100.0 AS total,coalesce(sum(p.amount),0)/100.0 AS paid,(d.total-coalesce(sum(p.amount),0))/100.0 AS balance FROM documents d JOIN customers c ON c.id=d.customer_id LEFT JOIN payments p ON p.document_id=d.id WHERE d.kind='Invoice' GROUP BY d.id ORDER BY d.id DESC"),
+            ('Supplier payable balances',"""SELECT p.id AS po_id,s.name AS supplier,p.status,
+                p.total/100.0 AS ordered_total,
+                (coalesce((SELECT sum(total) FROM po_receipts r WHERE r.po_id=p.id),0)+
+                 coalesce((SELECT sum(l.credit-l.debit) FROM journal j JOIN journal_lines l ON l.journal_id=j.id
+                           WHERE j.source_type='po' AND j.source_id=p.id AND l.account='Accounts Payable'),0))/100.0 AS received_value,
+                (coalesce((SELECT sum(total) FROM po_receipts r WHERE r.po_id=p.id),0)+
+                 coalesce((SELECT sum(l.credit-l.debit) FROM journal j JOIN journal_lines l ON l.journal_id=j.id
+                           WHERE j.source_type='po' AND j.source_id=p.id AND l.account='Accounts Payable'),0)-
+                 coalesce((SELECT sum(amount) FROM supplier_payments x WHERE x.po_id=p.id),0))/100.0 AS unpaid_balance
+                FROM purchase_orders p JOIN suppliers s ON s.id=p.supplier_id ORDER BY p.id DESC"""),
+            ('Customer credit accounts',"""SELECT c.name AS customer,CASE WHEN a.enabled=1 THEN 'Yes' ELSE 'No' END AS enabled,
+                a.credit_limit/100.0 AS credit_limit,
+                coalesce((SELECT sum(d.total-coalesce((SELECT sum(x.amount) FROM payments x
+                         WHERE x.document_id=d.id),0)) FROM documents d WHERE d.customer_id=c.id
+                         AND d.kind='Invoice' AND d.credit_account=1),0)/100.0 AS outstanding
+                FROM customer_credit_accounts a JOIN customers c ON c.id=a.customer_id
+                ORDER BY c.name"""),
         )
         for name,sql in reports:
             panel=ttk.Frame(p,padding=(10,8));panel.pack(fill='x',pady=3)

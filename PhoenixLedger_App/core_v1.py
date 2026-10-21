@@ -268,8 +268,13 @@ class App:
                 if self.db.execute('SELECT tax_exempt FROM customers WHERE id=?',(cid,)).fetchone()[0]:
                     tax=0
             total=subtotal+tax
-            if not messagebox.askyesno("Confirm",f"Create {kind} for {money(total)} with {len(items)} line item(s)?"):return
+            on_account=bool(v.get('credit_account',False)) and kind=='Invoice'
+            if not messagebox.askyesno("Confirm",f"Create {kind} for {money(total)} with {len(items)} line item(s)?"+
+                    ('\nThis invoice will be charged to the customer credit account.' if on_account else '')):return
             with self.db:
+                if on_account:
+                    from account_workflows import validate_credit_charge
+                    validate_credit_charge(self.db,cid,total)
                 if kind=="Invoice":
                     required={}
                     for pid,_,qty,_,_ in items:required[pid]=required.get(pid,0)+qty
@@ -279,6 +284,10 @@ class App:
                 cur=self.db.execute("""INSERT INTO documents(kind,customer_id,created,status,subtotal,tax,total,notes,created_by)
                        VALUES(?,?,?,'Open',?,?,?,?,?)""",(kind,cid,datetime.now().strftime("%Y-%m-%d"),subtotal,tax,total,v["notes"],self.user["id"]))
                 docid=cur.lastrowid
+                if on_account:
+                    from account_workflows import credit_due_date
+                    self.db.execute('UPDATE documents SET credit_account=1,credit_due_on=? WHERE id=?',
+                                    (credit_due_date(self.db,cid),docid))
                 for pid,desc,qty,unit,line in items:
                     self.db.execute("INSERT INTO document_items(document_id,product_id,description,qty,unit_price,line_total) VALUES(?,?,?,?,?,?)",
                                     (docid,pid,desc,qty,unit,line))

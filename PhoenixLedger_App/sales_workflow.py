@@ -1,7 +1,7 @@
 """Atomic conversion and payment operations shared by the UI and tests."""
 from datetime import date
 
-def convert_estimate(db, document_id):
+def convert_estimate(db, document_id, charge_credit=False):
     with db:
         doc=db.execute('SELECT kind FROM documents WHERE id=?',(document_id,)).fetchone()
         if doc is None: raise ValueError('Document not found.')
@@ -15,8 +15,15 @@ def convert_estimate(db, document_id):
             product=db.execute('SELECT qty FROM products WHERE id=?',(pid,)).fetchone()
             if product is None or product['qty']<qty:
                 raise ValueError(f'Not enough stock for product #{pid}. Need {qty}, available {product["qty"] if product else 0}.')
+        if charge_credit:
+            from account_workflows import validate_credit_charge
+            doc_amount=db.execute('SELECT customer_id,total FROM documents WHERE id=?',(document_id,)).fetchone()
+            validate_credit_charge(db,doc_amount['customer_id'],doc_amount['total'])
         # v2 journal triggers post revenue when kind changes only if an explicit journal is created below.
-        db.execute("UPDATE documents SET kind='Invoice',status='Open' WHERE id=?",(document_id,))
+        from account_workflows import credit_due_date
+        due=credit_due_date(db,doc_amount['customer_id']) if charge_credit else ''
+        db.execute("UPDATE documents SET kind='Invoice',status='Open',credit_account=?,credit_due_on=? WHERE id=?",
+                   (int(bool(charge_credit)),due,document_id))
         for pid,qty in required.items():
             db.execute('UPDATE products SET qty=qty-? WHERE id=?',(qty,pid))
         # Preserve original invoice/estimate date; conversion posts journal with that date.

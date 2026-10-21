@@ -89,7 +89,9 @@ class HomeTests(TestCase):
         all_tags={tag for item in flow.find_all() for tag in flow.gettags(item)}
         self.assertIn('action:po.new',all_tags)
         self.assertIn('action:estimate.new',all_tags)
-        self.assertIn('unavailable',all_tags)
+        self.assertIn('action:po.partial',all_tags)
+        self.assertIn('action:supplier.payment',all_tags)
+        self.assertIn('action:customer.credit',all_tags)
 
     def test_supplier_add_shortcut_opens_real_action(self):
         with patch.object(self.app,'form',return_value={'name':'New vendor','email':'','phone':'','address':''}):
@@ -125,11 +127,11 @@ class HomeTests(TestCase):
             tree.selection_set(iid)
             return True
         with patch.object(self.app,'_home_choose_record',side_effect=choose_first):
-            with patch('businessdesk.messagebox.askyesno',return_value=True):
+            with patch('businessdesk.messagebox.askyesno',return_value=True),patch('businessdesk.messagebox.showinfo'):
                 self.app.navigate_home_action('po.receive')
         self.assertEqual(self.db.execute('SELECT qty FROM products WHERE id=1').fetchone()[0],original_qty+2)
         self.assertEqual(self.db.execute('SELECT status FROM purchase_orders WHERE id=?',(po_id,)).fetchone()[0],'Received')
-        self.assertEqual(self.db.execute('SELECT count(*) FROM journal WHERE source_type=? AND source_id=?',('po',po_id)).fetchone()[0],1)
+        self.assertEqual(self.db.execute('SELECT count(*) FROM journal WHERE source_type=? AND source_id=?',('po_receipt',1)).fetchone()[0],1)
 
     def test_customer_and_product_shortcuts(self):
         for action,tab in [('customer.add','Customers'),('customer.edit','Customers'),

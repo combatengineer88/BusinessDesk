@@ -5,7 +5,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from xml.sax.saxutils import escape
 
-MONEY_COLUMNS = {'billed', 'received', 'spent', 'total', 'paid', 'balance', 'amount', 'debit', 'credit'}
+MONEY_COLUMNS = {'billed', 'received', 'spent', 'total', 'paid', 'balance', 'amount', 'debit', 'credit',
+                 'ordered_total', 'received_value', 'unpaid_balance', 'credit_limit', 'outstanding'}
 
 
 def format_report_cell(column, value):

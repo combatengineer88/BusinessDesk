@@ -14,8 +14,8 @@ GREEN = '#13816B'
 SIDEBAR = '#FFFFFF'
 UNAVAILABLE = '#A4ADBC'
 
-# IDs are routed by PhoenixLedger. Planned entries are visibly disabled and
-# never pretend to record accounting or receiving transactions.
+# IDs are routed to the existing purchasing, billing and credit workflows.
+# All enabled entries post through transaction-safe backend functions.
 QUICK_LINKS = (
     ('SUPPLIERS', (
         ('Add supplier', 'supplier.add'),
@@ -23,8 +23,8 @@ QUICK_LINKS = (
         ('New purchase order', 'po.new'),
         ('Edit existing PO', 'po.edit'),
         ('Receive entire PO', 'po.receive'),
-        ('Receive partial PO  ·  Planned', None),
-        ('Record supplier payment  ·  Planned', None),
+        ('Receive partial PO', 'po.partial'),
+        ('Record supplier payment', 'supplier.payment'),
     )),
     ('CUSTOMERS', (
         ('Add new customer', 'customer.add'),
@@ -34,7 +34,7 @@ QUICK_LINKS = (
         ('Create new estimate', 'estimate.new'),
         ('Convert estimate to invoice', 'estimate.convert'),
         ('Receive invoice payment', 'invoice.payment'),
-        ('Customer account credit  ·  Planned', None),
+        ('Customer credit account', 'customer.credit'),
     )),
     ('PRODUCTS', (
         ('Add new product', 'product.add'),
@@ -56,13 +56,14 @@ QUICK_LINKS = (
 SUPPLY_FLOW = (
     ('po.new', 'Create purchase\norder', 'Select a supplier and add items', 'PO'),
     ('po.receive', 'Receive full\norder', 'Update stock and accounting', 'IN'),
-    (None, 'Partial receipt', 'Planned feature', '...'),
-    (None, 'Supplier payment', 'Planned feature', '$'),
+    ('po.partial', 'Partial receipt', 'Record delivered quantities', 'IN'),
+    ('supplier.payment', 'Supplier payment', 'Settle received goods', '$'),
 )
 CUSTOMER_FLOW = (
     ('estimate.new', 'Create an\nestimate', 'Choose customer and products', 'EST'),
     ('estimate.convert', 'Convert estimate\nto invoice', 'Select an existing estimate', 'INV'),
     ('invoice.payment', 'Receive invoice\npayment', 'Select an unpaid invoice', '$'),
+    ('customer.credit', 'Customer credit\naccount', 'Manage limits and payments', 'CR'),
 )
 
 
@@ -129,7 +130,7 @@ class HomeWorkspace:
         self.flow.pack(side='left',fill='both',expand=True)
         vbar.configure(command=self.flow.yview)
         hbar.configure(command=self.flow.xview)
-        self.flow.configure(scrollregion=(0,0,1020,445))
+        self.flow.configure(scrollregion=(0,0,1020,527))
         self.flow.bind('<Configure>',self._resize_flow)
         self.flow.bind('<Destroy>',self._on_destroy)
         self.flow.bind('<Motion>',self._on_motion)
@@ -214,7 +215,7 @@ class HomeWorkspace:
         c.delete('all')
         self._canvas_commands={}
         width=max(970,c.winfo_width()-3)
-        height=445
+        height=527
         # No unused scrollbars on a full-size desktop; enable scrolling when
         # users resize PhoenixLedger or use a high-DPI, smaller display.
         if c.winfo_width()>=975:
@@ -228,7 +229,7 @@ class HomeWorkspace:
         c.configure(scrollregion=(0,0,width,height))
         self._lane(12,8,width-16,226,PALE_BLUE,'SUPPLIER / SUPPLY CHAIN',
                    'Order products, receive inventory, and track your supplier workflow.',BLUE)
-        self._lane(12,235,width-16,437,PALE_GREEN,'CUSTOMER / SALES CHAIN',
+        self._lane(12,235,width-16,516,PALE_GREEN,'CUSTOMER / SALES CHAIN',
                    'Start with an estimate, convert it to an invoice, and collect payment.',GREEN)
         # Nodes use a fixed minimum logical width; horizontal scrolling is
         # available instead of clipping nodes on a narrow display.
@@ -264,8 +265,10 @@ class HomeWorkspace:
         self._node(left,y,bw,bh,CUSTOMER_FLOW[0],GREEN)
         self._node(center,y,bw,bh,CUSTOMER_FLOW[1],GREEN)
         self._node(right,y,bw,bh,CUSTOMER_FLOW[2],GREEN)
+        self._node(center,y+89,bw,bh,CUSTOMER_FLOW[3],GREEN)
         self._connector(((left+bw,y+bh/2),(center,y+bh/2)),GREEN,ending=True)
         self._connector(((center+bw,y+bh/2),(right,y+bh/2)),GREEN,ending=True)
+        self._connector(((center+bw/2,y+bh),(center+bw/2,y+89)),GREEN,ending=True)
         c.tag_raise('workflow_node')
         c.tag_raise('workflow_text')
 

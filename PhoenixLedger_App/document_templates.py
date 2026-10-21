@@ -213,6 +213,8 @@ def render_document(db, kind: str, record_id: int, output, template_override=Non
     story.append(p(f'{conf["recipient_label"]}: {metadata["name"]}'))
     if conf['show_address'] and metadata.get('address'):story.append(p(metadata['address'],small_style))
     story.append(p(f'Date: {metadata["date"]}',small_style))
+    if not preview and kind=='Invoice' and 'credit_due_on' in doc.keys() and doc['credit_due_on']:
+        story.append(p(f'Credit account due: {doc["credit_due_on"]}',small_style))
     story.append(Spacer(1,10 if compact else 16))
 
     head=[conf['label_item'],conf['label_quantity'],conf['label_rate'],conf['label_total']]

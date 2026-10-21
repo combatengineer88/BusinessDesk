@@ -19,7 +19,7 @@ PAGE_SIZES = {'Letter': letter, 'A4': A4}
 TYPES = ('text', 'field', 'section', 'rectangle', 'line', 'logo', 'image', 'items', 'totals', 'notes', 'terms', 'footer')
 FIELDS = ('business_name','business_address','business_phone','business_email','customer_name','customer_address',
           'customer_email','supplier_name','supplier_address','supplier_email','document_title','document_number',
-          'date','subtotal','tax','total','notes','payment_terms','page_number')
+          'date','due_date','subtotal','tax','total','notes','payment_terms','page_number')
 DEFAULT_FONT = 'Helvetica'
 MAX_OBJECTS = 110
 
@@ -154,11 +154,15 @@ def document_data(db,kind,record_id,preview=False):
             'document_title':{'Estimate':'Estimate','Invoice':'Invoice','PO':'Purchase Order'}[kind],
             'document_number':str(record_id),
             'date': row['ordered_on'] if kind=='PO' else row['created'],
+            'due_date': row['credit_due_on'] if kind!='PO' and 'credit_due_on' in row.keys() else '',
             'subtotal':money(subtotal),'tax':money(tax),'total':money(total),
-            'notes':row['notes'] or '', 'payment_terms':'', 'page_number':'1',
+            'notes':row['notes'] or '',
+            'payment_terms':'', 'page_number':'1',
             '_rows':[(i[0],int(i[1]),int(i[2]),int(i[1])*int(i[2])) for i in items],
             '_subtotal':subtotal,'_tax':tax,'_total':total,
         }
+        if result['due_date']:
+            result['payment_terms']='Due '+result['due_date']
     settings={r['key']:r['value'] for r in db.execute('SELECT key,value FROM settings')}
     if not preview:
         result.update({

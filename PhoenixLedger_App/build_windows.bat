@@ -2,7 +2,7 @@
 cd /d "%~dp0"
 py -3.12 -m pip install -r requirements.txt pyinstaller
 if errorlevel 1 goto fail
-py -3.12 -m PyInstaller --noconfirm --clean --onedir --windowed --icon "phoenixledger.ico" --name PhoenixLedger --collect-all reportlab --collect-all PIL --collect-all openpyxl --hidden-import excel_import --hidden-import supplier_catalog --hidden-import release_layout --hidden-import installer_assets --hidden-import document_templates --hidden-import template_editor --hidden-import visual_templates --hidden-import visual_template_editor --hidden-import home_workspace --hidden-import modern_theme --hidden-import po_editor --hidden-import responsive_ui --hidden-import address_utils --hidden-import report_export --add-data "update_installer.ps1;." --add-data "installer_update.ps1;." --add-data "phoenixledger_logo.png;." --add-data "phoenixledger_icon.png;." launcher.py
+py -3.12 -m PyInstaller --noconfirm --clean --onedir --windowed --icon "phoenixledger.ico" --name PhoenixLedger --collect-all reportlab --collect-all PIL --collect-all openpyxl --hidden-import excel_import --hidden-import supplier_catalog --hidden-import release_layout --hidden-import installer_assets --hidden-import document_templates --hidden-import template_editor --hidden-import visual_templates --hidden-import visual_template_editor --hidden-import home_workspace --hidden-import modern_theme --hidden-import po_editor --hidden-import responsive_ui --hidden-import address_utils --hidden-import report_export --hidden-import account_workflows --hidden-import account_dialogs --add-data "update_installer.ps1;." --add-data "installer_update.ps1;." --add-data "phoenixledger_logo.png;." --add-data "phoenixledger_icon.png;." launcher.py
 if errorlevel 1 goto fail
 if not exist "dist\PhoenixLedger\_internal\python312.dll" goto fail
 py -3.12 package_release.py
@@ -14,7 +14,7 @@ if not exist "%ISCC%" (
   pause
   exit /b 0
 )
-"%ISCC%" /DBuildVersion=2.9.12 "businessdesk.iss"
+"%ISCC%" /DBuildVersion=3.1.0 "businessdesk.iss"
 if errorlevel 1 goto fail
 py -3.12 package_setup.py
 if errorlevel 1 goto fail
