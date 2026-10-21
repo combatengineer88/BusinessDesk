@@ -1,13 +1,13 @@
 ; TDZIGNS LLC PhoenixLedger — per-user Windows Setup installer.
 ; Compiled by GitHub Actions on Windows using Inno Setup 6.
 #ifndef BuildVersion
-  #define BuildVersion "2.9.12"
+  #define BuildVersion "3.0.1"
 #endif
 #define AppTitle "PhoenixLedger"
 #define AppExe "PhoenixLedger.exe"
 
 [Setup]
-AppId={{D19D89FE-3899-4CBD-A6D6-81582D0324A4}
+AppId={{4B4A0178-9F74-42A0-B56D-26342AF6C801}
 AppName={#AppTitle}
 AppVersion={#BuildVersion}
 AppPublisher=TDZIGNS LLC
@@ -25,9 +25,10 @@ DisableDirPage=yes
 DisableProgramGroupPage=yes
 CloseApplications=yes
 RestartApplications=no
-UsePreviousAppDir=yes
+UsePreviousAppDir=no
 UninstallDisplayIcon={app}\{#AppExe}
 SetupLogging=yes
+SetupIconFile=phoenixledger.ico
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

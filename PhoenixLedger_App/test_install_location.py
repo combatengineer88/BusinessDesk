@@ -24,8 +24,12 @@ class InstallLocationTests(unittest.TestCase):
         self.assertEqual(choose_install_target(STABLE,LOCAL,TEMP),(STABLE,False))
 
     def test_case_insensitive_windows_paths(self):
-        old=r'c:\USERS\EXAMPLE\APPDATA\LOCAL\TEMP\FILE.ZIP.X\TDZIGNS_BUSINESSDESK.EXE'
+        old=r'c:\USERS\EXAMPLE\APPDATA\LOCAL\TEMP\FILE.ZIP.X\PHOENIXLEDGER.EXE'
         self.assertEqual(choose_install_target(old,LOCAL,TEMP),(STABLE,True))
+
+    def test_old_businessdesk_executable_is_not_phoenixledger(self):
+        with self.assertRaises(ValueError):
+            choose_install_target(r'C:\Temp\TDZIGNS_BusinessDesk.exe',LOCAL,TEMP)
 
     def test_invalid_name_rejected(self):
         with self.assertRaises(ValueError):

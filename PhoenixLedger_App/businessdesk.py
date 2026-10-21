@@ -25,7 +25,7 @@ from home_workspace import HomeWorkspace
 from responsive_ui import ResponsiveToolbar, scrollable_page
 from report_export import export_report_pdf
 
-VERSION = '3.0.0'
+VERSION = '3.0.1'
 BUSINESS = 'TDZIGNS LLC'
 RELEASE_MANIFEST_URL = 'https://github.com/combatengineer88/BusinessDesk/releases/latest/download/update_manifest.json'
 TRUSTED_RELEASE_PREFIX = 'https://github.com/combatengineer88/BusinessDesk/releases/download/'
@@ -196,9 +196,10 @@ class PhoenixLedger(BaseApp):
         for child in header.winfo_children():child.destroy()
         header.configure(style='Header.TFrame',padding=(22,15))
         try:
-            self._brand_logo=tk.PhotoImage(file=str(bundled_path('phoenixledger_logo.png')))
+            self._brand_logo=tk.PhotoImage(file=str(bundled_path('phoenixledger_icon.png')))
             x=max(1,self._brand_logo.width()//44); y=max(1,self._brand_logo.height()//44)
             self._brand_logo_small=self._brand_logo.subsample(x,y)
+            self.root.iconphoto(True,self._brand_logo)
             ttk.Label(header,image=self._brand_logo_small).pack(side='left',padx=(0,10))
         except Exception:
             self._brand_logo_small=None

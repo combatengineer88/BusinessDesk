@@ -1,9 +1,13 @@
 """Bundle PyInstaller ONEDIR output into a verifiable GitHub update ZIP."""
 from pathlib import Path
-import hashlib, json, zipfile
+import hashlib, json, zipfile, re
 from release_layout import valid_release_names
 
-VERSION = "2.9.12"
+source=(Path(__file__).resolve().parent/'businessdesk.py').read_text(encoding='utf-8')
+match=re.search(r"^VERSION = '([0-9]+\.[0-9]+\.[0-9]+)'",source,re.M)
+if not match:
+    raise SystemExit('Could not determine PhoenixLedger application version')
+VERSION = match.group(1)
 REPOSITORY = "combatengineer88/BusinessDesk"
 DIST = Path('dist/PhoenixLedger')
 EXE = DIST / 'PhoenixLedger.exe'
