@@ -18,7 +18,9 @@ UNAVAILABLE = '#A4ADBC'
 # All enabled entries post through transaction-safe backend functions.
 QUICK_LINKS = (
     ('SUPPLIERS', (
+        ('View supplier directory', 'supplier.list'),
         ('Add supplier', 'supplier.add'),
+        ('Edit supplier information', 'supplier.edit'),
         ('Import suppliers from Excel', 'supplier.import'),
         ('New purchase order', 'po.new'),
         ('Edit existing PO', 'po.edit'),

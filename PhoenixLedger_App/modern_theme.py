@@ -24,6 +24,7 @@ def apply(root):
     s.configure('Property.TLabel',background=WHITE,foreground=SLATE,font=('Segoe UI',9))
     s.configure('SideHeading.TLabel',background=WHITE,foreground=MUTED,font=('Segoe UI',9,'bold'))
     s.configure('Header.TFrame',background=SLATE)
+    s.configure('HeaderIcon.TLabel',background=SLATE,padding=0,borderwidth=0,relief='flat')
     s.configure('HeaderTitle.TLabel',background=SLATE,foreground=WHITE,font=('Segoe UI',17,'bold'))
     s.configure('HeaderInfo.TLabel',background=SLATE,foreground='#B9C7D9',font=('Segoe UI',10))
     s.configure('Card.TFrame',background=WHITE,relief='solid',borderwidth=1)

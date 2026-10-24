@@ -23,6 +23,12 @@ HEADERS = {
         'email': ('email','email address','e-mail'),
         'phone': ('phone','phone number','telephone','mobile'),
         'address': ('address','street address','mailing address'),
+        'contact_name': ('contact','contact name','contact person','primary contact','representative'),
+        'website': ('website','web site','website url','web address','url'),
+        'city': ('city','town'),
+        'state': ('state','province','state province','region'),
+        'zip_code': ('zip','zip code','zipcode','postal code','postcode','postal'),
+        'notes': ('notes','comments','remarks'),
     },
     'products': {
         'sku': ('sku','product sku','item number','item #','item code','product code'),
@@ -65,10 +71,19 @@ def parse(kind, values):
     def val(k):return str(values.get(k) if values.get(k) is not None else '').strip()
     if kind in ('customers','suppliers'):
         name=val('name')
-        if not name:raise ValueError("Customer name required")
-        result=dict(name=name,email=val('email'),phone=val('phone'),address=val('address'))
-        if kind=='customers':result.update(notes=val('notes'),city=val('city'),state=val('state'),zip_code=val('zip_code'))
-        return result
+        if not name:raise ValueError(('Customer' if kind=='customers' else 'Supplier')+' name required')
+        if kind=='suppliers':
+            # Keep track of which headers were actually in the workbook. Import
+            # updates must not erase existing contact fields when omitted.
+            from supplier_management import FIELDS, MAX_LENGTHS
+            result={key:val(key) for key in FIELDS if key in values}
+            result['name']=name
+            for key, value in result.items():
+                if len(value)>MAX_LENGTHS[key]:
+                    raise ValueError(f'{key.replace("_"," ").title()} too long')
+            return result
+        return dict(name=name,email=val('email'),phone=val('phone'),address=val('address'),
+                    notes=val('notes'),city=val('city'),state=val('state'),zip_code=val('zip_code'))
     sku=val('sku');name=val('name')
     if not sku or not name:raise ValueError("SKU and product name required")
     if not val('price'):raise ValueError("Price required")
@@ -127,16 +142,23 @@ def import_rows(db,kind,rows,mode='skip'):
                         db.execute("""UPDATE customers SET email=?,phone=?,address=?,notes=?,city=?,state=?,zip_code=? WHERE id=?""",
                                    (v['email'],v['phone'],v['address'],v['notes'],v['city'],v['state'],v['zip_code'],existing[0]))
                     else:
-                        db.execute("UPDATE suppliers SET email=?,phone=?,address=? WHERE id=?",
-                                   (v['email'],v['phone'],v['address'],existing[0]))
+                        from supplier_management import FIELDS
+                        # Update only columns present in the workbook; preserve
+                        # any older fields not included in this supplier import.
+                        supplied=[key for key in FIELDS if key in v and key!='name']
+                        if supplied:
+                            db.execute('UPDATE suppliers SET '+','.join(f'{key}=?' for key in supplied)+' WHERE id=?',
+                                       (*[v[key] for key in supplied],existing[0]))
                     updated+=1
                 else:
                     if kind=='customers':
                         db.execute("INSERT INTO customers(name,email,phone,address,notes,city,state,zip_code) VALUES(?,?,?,?,?,?,?,?)",
                                    (v['name'],v['email'],v['phone'],v['address'],v['notes'],v['city'],v['state'],v['zip_code']))
                     else:
-                        db.execute("INSERT INTO suppliers(name,email,phone,address) VALUES(?,?,?,?)",
-                                   (v['name'],v['email'],v['phone'],v['address']))
+                        from supplier_management import FIELDS
+                        supplied=[key for key in FIELDS if key in v]
+                        db.execute('INSERT INTO suppliers('+','.join(supplied)+') VALUES('+','.join('?' for _ in supplied)+')',
+                                   tuple(v[key] for key in supplied))
                     created+=1
             else:
                 existing=db.execute("SELECT id FROM products WHERE sku=? COLLATE NOCASE",(v['sku'],)).fetchone()

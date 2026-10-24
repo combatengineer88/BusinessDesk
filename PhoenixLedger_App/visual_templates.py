@@ -19,7 +19,7 @@ PAGE_SIZES = {'Letter': letter, 'A4': A4}
 TYPES = ('text', 'field', 'section', 'rectangle', 'line', 'logo', 'image', 'items', 'totals', 'notes', 'terms', 'footer')
 FIELDS = ('business_name','business_address','business_phone','business_email','customer_name','customer_address',
           'customer_email','supplier_name','supplier_address','supplier_email','document_title','document_number',
-          'date','due_date','subtotal','tax','total','notes','payment_terms','page_number')
+          'date','due_date','document_reference_label','subtotal','tax','total','notes','payment_terms','page_number')
 DEFAULT_FONT = 'Helvetica'
 MAX_OBJECTS = 110
 
@@ -47,9 +47,8 @@ def default_layout(kind):
         node('field',146,76,405,52,'{{business_address}}\n{{business_phone}}  {{business_email}}',9,False,'#64748B'),
         node('line',42,138,528,1,color='#CBD5E1'),
         node('text',42,163,375,39,heading,27,True,'#17263C'),
-        node('field',430,166,140,25,'#{{document_number}}',14,True,'#2563EB',align='right'),
         node('section',42,226,297,74,'BILL TO\n{{'+who+'_name}}\n{{'+who+'_address}}',10,False,'#223047'),
-        node('section',376,226,194,69,'DOCUMENT DETAILS\nDate: {{date}}',10,False,'#223047'),
+        node('section',376,226,194,81,'DOCUMENT DETAILS\n{{document_reference_label}}: {{document_number}}\nDate: {{date}}',10,False,'#223047'),
         node('items',42,329,528,218,'',10),
         node('notes',42,566,291,95,'NOTES',10),
         node('totals',367,566,203,92,'',11),
@@ -97,10 +96,31 @@ def validate(kind, layout):
     return copy.deepcopy(layout)
 
 
+def place_reference_near_date(kind, layout):
+    """Adapt legacy date-only detail blocks at render/editor time without DB mutation.
+
+    Custom templates remain independent and user-editable. The old stock number
+    field near the title is hidden when the stock details box is upgraded.
+    """
+    design=copy.deepcopy(layout)
+    for obj in design['objects']:
+        if (obj['type']=='section' and obj['text']=='DOCUMENT DETAILS\nDate: {{date}}'):
+            obj['text']='DOCUMENT DETAILS\n{{document_reference_label}}: {{document_number}}\nDate: {{date}}'
+            # The original 69 pt block has enough room for two body lines; grow
+            # modestly only when it fits without passing the page boundary.
+            obj['h']=min(max(obj['h'],81),PAGE_SIZES[design['page_size']][1]-obj['y'])
+            design['objects']=[other for other in design['objects']
+                               if not (other['type']=='field' and
+                                       other['text']=='#{{document_number}}' and
+                                       abs(other['x']-430)<1 and abs(other['y']-166)<1)]
+            break
+    return design
+
+
 def load(db,kind):
     row=db.execute('SELECT value FROM settings WHERE key=?',(settings_key(kind),)).fetchone()
     if not row:return None
-    return validate(kind,json.loads(row[0]))
+    return place_reference_near_date(kind, validate(kind,json.loads(row[0])))
 
 
 def save(db,kind,layout):
@@ -120,7 +140,7 @@ def sample_data(kind):
     return dict(company,customer_name='Example Customer',customer_address='123 Sample Road\nMadison, WI 53703',
                 customer_email='customer@example.com',supplier_name='Example Supplier',supplier_address='44 Supply Park\nMilwaukee, WI',
                 supplier_email='supplier@example.com',document_title={'Estimate':'Estimate','Invoice':'Invoice','PO':'Purchase Order'}[kind],
-                document_number='PREVIEW',date='2026-10-19',subtotal='$385.00',tax='$21.18' if kind!='PO' else '$0.00',
+                document_number='PREVIEW',document_reference_label={'Estimate':'Estimate #','Invoice':'Invoice #','PO':'PO #'}[kind],date='2026-10-19',subtotal='$385.00',tax='$21.18' if kind!='PO' else '$0.00',
                 total='$406.18' if kind!='PO' else '$385.00',notes='Thank you for considering our services.\nContact us with questions.',
                 payment_terms='Net 30',page_number='1',_rows=[('Custom T-Shirt',4,2500,10000),('Custom Vinyl Decals',15,1900,28500)],
                 _subtotal=38500,_tax=2118 if kind!='PO' else 0,_total=40618 if kind!='PO' else 38500,
@@ -153,6 +173,7 @@ def document_data(db,kind,record_id,preview=False):
             'supplier_email':(row['email'] or '') if kind=='PO' else '',
             'document_title':{'Estimate':'Estimate','Invoice':'Invoice','PO':'Purchase Order'}[kind],
             'document_number':str(record_id),
+            'document_reference_label':{'Estimate':'Estimate #','Invoice':'Invoice #','PO':'PO #'}[kind],
             'date': row['ordered_on'] if kind=='PO' else row['created'],
             'due_date': row['credit_due_on'] if kind!='PO' and 'credit_due_on' in row.keys() else '',
             'subtotal':money(subtotal),'tax':money(tax),'total':money(total),
@@ -289,7 +310,7 @@ def _draw_totals(pdf,obj,data,page_h,top):
 
 def render(db,kind,record_id,output,layout=None,preview=False):
     """Render a free-positioned PDF; long item tables automatically continue on pages."""
-    layout=validate(kind,layout) if layout is not None else load(db,kind)
+    layout=place_reference_near_date(kind, validate(kind,layout)) if layout is not None else load(db,kind)
     if layout is None:layout=default_layout(kind)
     data=document_data(db,kind,record_id,preview)
     data['_accent']=layout['accent']

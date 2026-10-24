@@ -20,15 +20,16 @@ from document_templates import render_document
 from template_editor import open_template_editor
 from visual_templates import load as load_visual_template, render as render_visual_document
 from visual_template_editor import open_visual_template_editor
-from modern_theme import apply as apply_modern_theme
+from modern_theme import apply as apply_modern_theme, SLATE as HEADER_BG
 from home_workspace import HomeWorkspace
 from responsive_ui import ResponsiveToolbar, scrollable_page
 from report_export import export_report_pdf
 from account_workflows import (ensure_schema as ensure_account_schema,receive_po,po_lines,po_balance,
     po_received_value,record_supplier_payment,credit_info,validate_credit_charge)
 from account_dialogs import receive_partial_dialog,supplier_payment_dialog,credit_manager_dialog
+from supplier_management import ensure_schema as ensure_supplier_schema, save_supplier, search_suppliers
 
-VERSION = '3.1.0'
+VERSION = '3.2.0'
 BUSINESS = 'TDZIGNS LLC'
 RELEASE_MANIFEST_URL = 'https://github.com/combatengineer88/BusinessDesk/releases/latest/download/update_manifest.json'
 TRUSTED_RELEASE_PREFIX = 'https://github.com/combatengineer88/BusinessDesk/releases/download/'
@@ -128,6 +129,7 @@ def schema(db):
       VALUES((SELECT id FROM journal WHERE source_type='expense' AND source_id=NEW.id),'Cash',0,NEW.amount);
     END;
     """)
+    ensure_supplier_schema(db)
     ensure_account_schema(db)
     db.commit()
 
@@ -204,7 +206,7 @@ class PhoenixLedger(BaseApp):
             x=max(1,self._brand_logo.width()//44); y=max(1,self._brand_logo.height()//44)
             self._brand_logo_small=self._brand_logo.subsample(x,y)
             self.root.iconphoto(True,self._brand_logo)
-            ttk.Label(header,image=self._brand_logo_small).pack(side='left',padx=(0,10))
+            tk.Label(header,image=self._brand_logo_small,bg=HEADER_BG,bd=0,highlightthickness=0,relief='flat').pack(side='left',padx=(0,10))
         except Exception:
             self._brand_logo_small=None
         ttk.Label(header,text='PHOENIXLEDGER',style='HeaderTitle.TLabel').pack(side='left',padx=(0,18))
@@ -214,6 +216,10 @@ class PhoenixLedger(BaseApp):
                   style='HeaderInfo.TLabel').pack(side='right')
         self.tabs.bind('<<NotebookTabChanged>>',self._on_tab_changed)
         self.root.title(f'{BUSINESS} | PhoenixLedger {VERSION}')
+        suppliers_frame=ttk.Frame(self.tabs,padding=12)
+        self.tabs.add(suppliers_frame,text='Suppliers')
+        self.tabs.insert(2,suppliers_frame)  # Following Customers, ahead of Products
+        self.suppliers(suppliers_frame)
         for label,fn in [('Purchase Orders',self.purchase_orders),('Accounting',self.accounting),('Settings / Updates',self.settings_tab)]:
             frame=ttk.Frame(self.tabs,padding=12);self.tabs.add(frame,text=label);fn(frame)
         home_frame=ttk.Frame(self.tabs,padding=0)
@@ -321,7 +327,8 @@ class PhoenixLedger(BaseApp):
     def navigate_home_action(self,action):
         """Open the owning tab and reuse its real callback, with row selection."""
         targets={
-            'supplier.add':'Purchase Orders','supplier.import':'Purchase Orders',
+            'supplier.list':'Suppliers','supplier.add':'Suppliers',
+            'supplier.edit':'Suppliers','supplier.import':'Suppliers',
             'po.new':'Purchase Orders','po.edit':'Purchase Orders','po.receive':'Purchase Orders',
             'po.partial':'Purchase Orders','supplier.payment':'Purchase Orders',
             'customer.add':'Customers','customer.import':'Customers',
@@ -510,6 +517,101 @@ class PhoenixLedger(BaseApp):
         ttk.Label(p,text='Financial figures are operational summaries, not a complete accounting ledger or tax report.',
                   foreground='#64748B').pack(anchor='w',pady=(16,7))
         ttk.Button(p,text='Refresh overview',style='Accent.TButton',command=self.home).pack(anchor='w',pady=(2,10))
+
+    def suppliers(self,p):
+        """Supplier directory with independent editing and Excel import."""
+        title=ttk.Frame(p);title.pack(fill='x',pady=(2,8))
+        ttk.Label(title,text='Suppliers',style='Section.TLabel').pack(side='left')
+        ttk.Label(title,text='Supplier directory and purchasing contacts',
+                  foreground='#64748B').pack(side='left',padx=16)
+        search_row=ttk.Frame(p);search_row.pack(fill='x',pady=(2,8))
+        ttk.Label(search_row,text='Search suppliers:').pack(side='left',padx=(0,9))
+        search=tk.StringVar()
+        ttk.Entry(search_row,textvariable=search).pack(side='left',fill='x',expand=True)
+        bar=ResponsiveToolbar(p);bar.pack(fill='x')
+        tree=self.table(p,('ID','Name','Contact','Email','Phone','Website','Street address','City','State','ZIP',
+                           'Linked products','Purchase orders','Notes'))
+        total_label=ttk.Label(p,text='',foreground='#64748B')
+        total_label.pack(anchor='w',pady=(5,0))
+
+        def refresh(*_):
+            selection=tree.selection()
+            selected_id=tree.item(selection[0],'values')[0] if selection else None
+            tree.delete(*tree.get_children())
+            records=search_suppliers(self.db,search.get())
+            for supplier in records:
+                item=tree.insert('','end',iid=str(supplier['id']),values=(
+                    supplier['id'],supplier['name'],supplier['contact_name'] or '',
+                    supplier['email'] or '',supplier['phone'] or '',supplier['website'] or '',
+                    supplier['address'] or '',supplier['city'] or '',supplier['state'] or '',
+                    supplier['zip_code'] or '',supplier['product_count'],supplier['po_count'],
+                    supplier['notes'] or ''))
+                if selected_id is not None and str(supplier['id'])==str(selected_id):
+                    tree.selection_set(item)
+            total_label.configure(text=f'{len(records)} supplier(s) shown. Double-click to edit.')
+
+        def edit(new=False):
+            sid=None if new else self.selected(tree)
+            row=None if new else self.db.execute('SELECT * FROM suppliers WHERE id=?',(sid,)).fetchone()
+            if not new and row is None:raise ValueError('The selected supplier no longer exists.')
+            record={} if row is None else dict(row)
+            dialog=tk.Toplevel(self.root)
+            dialog.title('Add supplier' if new else 'Edit supplier')
+            dialog.transient(self.root);dialog.grab_set()
+            dialog.geometry('720x650');dialog.minsize(490,420)
+            footer=ttk.Frame(dialog,padding=(14,11));footer.pack(side='bottom',fill='x')
+            content=ttk.Frame(dialog,padding=(18,12));content.pack(side='top',fill='both',expand=True)
+            # Let the detail form scroll on smaller screens while keeping Save visible.
+            canvas=tk.Canvas(content,highlightthickness=0,borderwidth=0)
+            scroll=ttk.Scrollbar(content,orient='vertical',command=canvas.yview)
+            scroll.pack(side='right',fill='y')
+            canvas.pack(side='left',fill='both',expand=True)
+            canvas.configure(yscrollcommand=scroll.set)
+            inner=ttk.Frame(canvas)
+            pane=canvas.create_window(0,0,anchor='nw',window=inner)
+            inner.columnconfigure(1,weight=1)
+            inner.bind('<Configure>',lambda _:canvas.configure(scrollregion=canvas.bbox('all')))
+            canvas.bind('<Configure>',lambda e:canvas.itemconfigure(pane,width=e.width))
+            descriptors=(('name','Supplier / company name *'),('contact_name','Primary contact'),
+                         ('email','Email'),('phone','Phone'),('website','Website'),
+                         ('address','Street address'),('city','City'),('state','State / Province'),
+                         ('zip_code','ZIP / Postal code'),('notes','Notes'))
+            fields={}
+            for index,(key,label) in enumerate(descriptors):
+                ttk.Label(inner,text=label).grid(row=index,column=0,sticky='w',padx=(2,15),pady=10)
+                value=tk.StringVar(value=record.get(key) or '')
+                ttk.Entry(inner,textvariable=value).grid(row=index,column=1,sticky='ew',pady=8)
+                fields[key]=value
+            ttk.Label(inner,text='Existing POs, receipts, payments and linked products keep their supplier association.',
+                      foreground='#64748B',wraplength=420).grid(row=len(descriptors),column=0,
+                      columnspan=2,sticky='w',pady=12)
+            def save():
+                try:
+                    save_supplier(self.db,{key:var.get() for key,var in fields.items()},sid)
+                except (ValueError,sqlite3.IntegrityError) as exc:
+                    messagebox.showerror('Supplier could not be saved',str(exc),parent=dialog)
+                    return
+                dialog.destroy();refresh()
+            ttk.Button(footer,text='Cancel',command=dialog.destroy).pack(side='right',padx=5)
+            ttk.Button(footer,text='Save supplier',style='Accent.TButton',command=save).pack(side='right',padx=5)
+            dialog.bind('<Escape>',lambda _:dialog.destroy())
+            dialog.wait_window()
+
+        def import_suppliers():
+            self.import_excel_dialog('suppliers')
+
+        self.register_home_action('supplier.list',refresh)
+        self.register_home_action('supplier.add',lambda:edit(True))
+        self.register_home_action('supplier.edit',edit,tree)
+        self.register_home_action('supplier.import',import_suppliers)
+        self.button(bar,'Add supplier',lambda:edit(True))
+        self.button(bar,'Edit selected supplier',edit)
+        if self.user['role']=='admin':
+            self.button(bar,'Import suppliers from Excel',import_suppliers)
+        self.button(bar,'Refresh suppliers',refresh)
+        tree.bind('<Double-1>',lambda event:self.safe(edit))
+        search.trace_add('write',refresh)
+        refresh()
 
     def customers(self,p):
         bar=ResponsiveToolbar(p);bar.pack(fill='x')
@@ -987,13 +1089,6 @@ class PhoenixLedger(BaseApp):
             for r in self.db.execute('SELECT p.*,s.name FROM purchase_orders p JOIN suppliers s ON s.id=p.supplier_id ORDER BY p.id DESC'):
                 tree.insert('','end',values=(r['id'],r['name'],r['ordered_on'],r['status'],money(r['total']),
                                               money(po_received_value(self.db,r['id'])),money(po_balance(self.db,r['id']))))
-        self.button(bar,'Import suppliers from Excel',lambda:self.import_excel_dialog('suppliers'))
-        def supplier():
-            v=self.form('New supplier',[(x,x.title()) for x in ('name','email','phone','address')])
-            if not v:return
-            if not v['name']:raise ValueError('Supplier name required.')
-            with self.db:self.db.execute('INSERT INTO suppliers(name,email,phone,address) VALUES(?,?,?,?)',tuple(v.values()))
-            messagebox.showinfo('Supplier added','Supplier saved.')
         def create():
             po_id=open_purchase_order_editor(self.root,self.db)
             if po_id is not None:
@@ -1023,14 +1118,11 @@ class PhoenixLedger(BaseApp):
             po_id=self.selected(tree)
             path=filedialog.asksaveasfilename(defaultextension='.pdf',initialfile=f'PO_{po_id}.pdf',filetypes=[('PDF','*.pdf')])
             if path:make_pdf(self.db,'PO',po_id,path);messagebox.showinfo('Saved','Purchase order PDF exported.')
-        self.register_home_action('supplier.add',supplier)
-        self.register_home_action('supplier.import',lambda:self.import_excel_dialog('suppliers'))
         self.register_home_action('po.new',create)
         self.register_home_action('po.edit',edit,tree,lambda v:len(v)>3 and v[3]=='Open')
         self.register_home_action('po.receive',receive_entire,tree,lambda v:len(v)>3 and v[3] in ('Open','Partially Received'))
         self.register_home_action('po.partial',receive_partial,tree,lambda v:len(v)>3 and v[3] in ('Open','Partially Received'))
         self.register_home_action('supplier.payment',supplier_payment,tree,lambda v:len(v)>6 and v[6]!='$0.00')
-        self.button(bar,'Add supplier',supplier)
         self.button(bar,'New PO',create);self.button(bar,'Edit selected PO',edit)
         self.button(bar,'Receive entire PO',receive_entire)
         self.button(bar,'Receive partial PO',receive_partial)

@@ -62,6 +62,7 @@ class HomeTests(TestCase):
         tabs=self.tab_names()
         self.assertEqual(tabs[0],'Home')
         self.assertIn('Purchase Orders',tabs)
+        self.assertIn('Suppliers',tabs)
         self.assertIn('Settings / Updates',tabs)
         self.assertEqual(self.app.tabs.tab(self.app.tabs.select(),'text'),'Home')
         self.assertIsNotNone(self.find_button(self.app.tabs,'Add supplier'))
@@ -94,11 +95,13 @@ class HomeTests(TestCase):
         self.assertIn('action:customer.credit',all_tags)
 
     def test_supplier_add_shortcut_opens_real_action(self):
-        with patch.object(self.app,'form',return_value={'name':'New vendor','email':'','phone':'','address':''}):
-            with patch('businessdesk.messagebox.showinfo'):
-                self.app.navigate_home_action('supplier.add')
-        self.assertEqual(self.db.execute("SELECT count(*) FROM suppliers WHERE name='New vendor'").fetchone()[0],1)
-        self.assertEqual(self.app.tabs.tab(self.app.tabs.select(),'text'),'Purchase Orders')
+        # Supplier entry is now an independent modal on the Suppliers tab.
+        # Stub the action dispatch to avoid waiting for manual dialog input.
+        self.assertIn('supplier.add',self.app._home_actions)
+        with patch.object(self.app,'safe') as dispatch:
+            self.app.navigate_home_action('supplier.add')
+        dispatch.assert_called_once()
+        self.assertEqual(self.app.tabs.tab(self.app.tabs.select(),'text'),'Suppliers')
 
     def test_existing_purchase_order_shortcut_selects_open_record(self):
         from supplier_catalog import create_supplier_po

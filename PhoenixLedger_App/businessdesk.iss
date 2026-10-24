@@ -1,7 +1,7 @@
 ; TDZIGNS LLC PhoenixLedger — per-user Windows Setup installer.
 ; Compiled by GitHub Actions on Windows using Inno Setup 6.
 #ifndef BuildVersion
-  #define BuildVersion "3.1.0"
+  #define BuildVersion "3.2.0"
 #endif
 #define AppTitle "PhoenixLedger"
 #define AppExe "PhoenixLedger.exe"

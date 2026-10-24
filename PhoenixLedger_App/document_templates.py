@@ -208,13 +208,26 @@ def render_document(db, kind: str, record_id: int, output, template_override=Non
     if conf['layout']=='Modern':
         title_style=ParagraphStyle('modern_title',parent=heading_style,textColor=accent)
     else:title_style=heading_style
-    story.append(p(f'{display_title} #{metadata["number"]}',title_style))
+    # Group the document reference beside its date, not in the page title.
+    # The same placement is used for estimates, invoices, and purchase orders.
+    story.append(p(display_title,title_style))
     if conf['tagline'].strip():story.append(p(conf['tagline'],small_style))
-    story.append(p(f'{conf["recipient_label"]}: {metadata["name"]}'))
-    if conf['show_address'] and metadata.get('address'):story.append(p(metadata['address'],small_style))
-    story.append(p(f'Date: {metadata["date"]}',small_style))
+    recipient=[p(f'{conf["recipient_label"]}: {metadata["name"]}')]
+    if conf['show_address'] and metadata.get('address'):
+        recipient.append(p(metadata['address'],small_style))
+    reference_label={'Estimate':'Estimate #','Invoice':'Invoice #','PO':'PO #'}[kind]
+    detail_heading=ParagraphStyle('bd_detail_heading',parent=small_style,fontName=bold,textColor=accent)
+    details=[p('DOCUMENT DETAILS',detail_heading),
+             p(f'{reference_label}: {metadata["number"]}',small_style),
+             p(f'Date: {metadata["date"]}',small_style)]
     if not preview and kind=='Invoice' and 'credit_due_on' in doc.keys() and doc['credit_due_on']:
-        story.append(p(f'Credit account due: {doc["credit_due_on"]}',small_style))
+        details.append(p(f'Credit account due: {doc["credit_due_on"]}',small_style))
+    meta=Table([[recipient,details]],colWidths=[usable*0.59,usable*0.41],hAlign='LEFT')
+    meta.setStyle(TableStyle([('VALIGN',(0,0),(-1,-1),'TOP'),
+        ('LEFTPADDING',(0,0),(-1,-1),0),('RIGHTPADDING',(0,0),(0,0),15),
+        ('LEFTPADDING',(1,0),(1,0),10),('RIGHTPADDING',(1,0),(1,0),0),
+        ('TOPPADDING',(0,0),(-1,-1),0),('BOTTOMPADDING',(0,0),(-1,-1),0)]))
+    story.append(meta)
     story.append(Spacer(1,10 if compact else 16))
 
     head=[conf['label_item'],conf['label_quantity'],conf['label_rate'],conf['label_total']]
