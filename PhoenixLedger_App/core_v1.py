@@ -62,6 +62,8 @@ def connect():
       REFERENCES documents(id), paid_on TEXT NOT NULL, amount INTEGER NOT NULL CHECK(amount>0),
       method TEXT DEFAULT '');
     """)
+    from account_recovery import create_schema
+    create_schema(db)
     db.commit()
     return db
 
@@ -122,6 +124,11 @@ class App:
                 self.user=dict(row);self.home()
             except Exception as e: self.error(e)
         ttk.Button(panel,text="Create administrator" if not count else "Sign in",command=submit).pack(pady=20)
+        if count:
+            def recovered(username):
+                name.set(username);pw.set('')
+            ttk.Button(panel,text="Forgot username or password?",
+                command=lambda:__import__('recovery_dialogs').forgot_account(self.root,self.db,DATA,recovered)).pack()
         self.root.bind("<Return>",lambda e:submit() if self.user is None else None)
     def home(self):
         self.clear()

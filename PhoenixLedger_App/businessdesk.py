@@ -29,7 +29,7 @@ from account_workflows import (ensure_schema as ensure_account_schema,receive_po
 from account_dialogs import receive_partial_dialog,supplier_payment_dialog,credit_manager_dialog
 from supplier_management import ensure_schema as ensure_supplier_schema, save_supplier, search_suppliers
 
-VERSION = '3.2.0'
+VERSION = '3.2.1'
 BUSINESS = 'TDZIGNS LLC'
 RELEASE_MANIFEST_URL = 'https://github.com/combatengineer88/BusinessDesk/releases/latest/download/update_manifest.json'
 TRUSTED_RELEASE_PREFIX = 'https://github.com/combatengineer88/BusinessDesk/releases/download/'
@@ -235,6 +235,9 @@ class PhoenixLedger(BaseApp):
         except (ValueError,TypeError):explicit_home=False
         if not explicit_home:self.tabs.insert(0,home_frame)
         self.tabs.select(home_frame)
+        if not getattr(self,'_recovery_setup_offered',False) and self.user and self.user['role']=='admin':
+            self._recovery_setup_offered=True
+            self.root.after(1300,self.offer_recovery_setup)
         self.tabs.bind('<ButtonPress-1>',self._tab_drag_start,add='+')
         self.tabs.bind('<ButtonRelease-1>',self._tab_drag_end,add='+')
         # Compact navigation captions, the header, and action bars at narrower widths.
@@ -1218,6 +1221,70 @@ class PhoenixLedger(BaseApp):
                 wraplength=650).pack(anchor='w',pady=6)
             archive_actions=ResponsiveToolbar(p);archive_actions.pack(fill='x')
             self.button(archive_actions,'Archive current database and create new',self.new_database)
+            ttk.Separator(p).pack(fill='x',pady=16)
+            ttk.Label(p,text='Account recovery',font=('Segoe UI',14,'bold')).pack(anchor='w',pady=6)
+            ttk.Label(p,text='Generate a one-time offline recovery code. Keep it somewhere private; it can reset your password if you forget your login.',wraplength=650).pack(anchor='w',pady=6)
+            recovery_bar=ResponsiveToolbar(p);recovery_bar.pack(fill='x')
+            self.button(recovery_bar,'Generate my recovery code',self.generate_my_recovery_code)
+            self.button(recovery_bar,'Reset employee password',self.reset_employee_password)
+
+    def reset_employee_password(self):
+        if not self.user or self.user['role']!='admin':
+            raise PermissionError('Administrator access required.')
+        from account_recovery import backup_database
+        rows=self.db.execute('SELECT id,username,role FROM users WHERE id<>? ORDER BY username',
+                             (self.user['id'],)).fetchall()
+        if not rows:
+            messagebox.showinfo('No other users','There are no other accounts to reset.',parent=self.root)
+            return
+        win=tk.Toplevel(self.root);win.title('Reset employee password')
+        win.transient(self.root);win.grab_set();win.resizable(False,False)
+        body=ttk.Frame(win,padding=20);body.pack()
+        ttk.Label(body,text='Employee account',font=('Segoe UI',11,'bold')).pack(anchor='w')
+        selected=tk.StringVar(value=rows[0]['username'])
+        ttk.Combobox(body,textvariable=selected,values=[r['username'] for r in rows],
+                     state='readonly',width=40).pack(fill='x',pady=(4,12))
+        ttk.Label(body,text='New password (at least 10 characters)').pack(anchor='w')
+        password=tk.StringVar();ttk.Entry(body,textvariable=password,show='*',width=42).pack(fill='x',pady=(4,12))
+        ttk.Label(body,text='Confirm new password').pack(anchor='w')
+        confirm=tk.StringVar();ttk.Entry(body,textvariable=confirm,show='*',width=42).pack(fill='x',pady=(4,12))
+        def apply():
+            if len(password.get())<10:
+                messagebox.showerror('Password too short','Use at least 10 characters.',parent=win);return
+            if password.get()!=confirm.get():
+                messagebox.showerror('Passwords differ','Passwords do not match.',parent=win);return
+            account=next((r for r in rows if r['username']==selected.get()),None)
+            if account is None:return
+            if not messagebox.askyesno('Confirm employee reset',
+                    'Reset the login for '+selected.get()+'? Existing business records will not change.',parent=win):return
+            from core_v1 import hashed
+            try:
+                backup=backup_database(self.db,DATA)
+                with self.db:
+                    self.db.execute('UPDATE users SET password=? WHERE id=?',(hashed(password.get()),account['id']))
+                    self.db.execute('DELETE FROM account_recovery WHERE user_id=?',(account['id'],))
+                win.destroy()
+                messagebox.showinfo('Password reset',
+                    f'Password for {selected.get()} was reset.\nBackup: {backup}',parent=self.root)
+            except Exception as error:
+                messagebox.showerror('Reset failed',str(error),parent=win)
+        actions=ttk.Frame(body);actions.pack(fill='x',pady=(8,0))
+        ttk.Button(actions,text='Save new password',command=apply).pack(side='left')
+        ttk.Button(actions,text='Cancel',command=win.destroy).pack(side='right')
+
+    def generate_my_recovery_code(self):
+        if not self.user or self.user['role']!='admin':
+            raise PermissionError('Administrator login required.')
+        from recovery_dialogs import show_code
+        show_code(self.root,self.db,self.user['id'])
+
+    def offer_recovery_setup(self):
+        if not self.user or self.user['role']!='admin':return
+        from account_recovery import has_code
+        if has_code(self.db,self.user['id']):return
+        if messagebox.askyesno('Protect your PhoenixLedger account',
+            'No offline recovery code is saved for this administrator. Generate a one-time code now so you can recover your username and reset your password later?',parent=self.root):
+            self.generate_my_recovery_code()
 
     def new_database(self):
         """Archive live SQLite database then atomically switch to an empty database."""
