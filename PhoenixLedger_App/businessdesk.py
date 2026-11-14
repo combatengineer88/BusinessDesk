@@ -24,12 +24,14 @@ from modern_theme import apply as apply_modern_theme, SLATE as HEADER_BG
 from home_workspace import HomeWorkspace
 from responsive_ui import ResponsiveToolbar, scrollable_page
 from report_export import export_report_pdf
+from inventory_labels import ensure_inventory_schema, attach_barcode_png, edit_product_field
+from barcode_dialogs import open_barcode_print_dialog
 from account_workflows import (ensure_schema as ensure_account_schema,receive_po,po_lines,po_balance,
     po_received_value,record_supplier_payment,credit_info,validate_credit_charge)
 from account_dialogs import receive_partial_dialog,supplier_payment_dialog,credit_manager_dialog
 from supplier_management import ensure_schema as ensure_supplier_schema, save_supplier, search_suppliers
 
-VERSION = '3.2.1'
+VERSION = '3.3.0'
 BUSINESS = 'TDZIGNS LLC'
 RELEASE_MANIFEST_URL = 'https://github.com/combatengineer88/BusinessDesk/releases/latest/download/update_manifest.json'
 TRUSTED_RELEASE_PREFIX = 'https://github.com/combatengineer88/BusinessDesk/releases/download/'
@@ -131,6 +133,7 @@ def schema(db):
     """)
     ensure_supplier_schema(db)
     ensure_account_schema(db)
+    ensure_inventory_schema(db)
     db.commit()
 
 
@@ -802,11 +805,13 @@ class PhoenixLedger(BaseApp):
         self.home()
 
     def products(self,p):
-        bar=ResponsiveToolbar(p);bar.pack(fill='x')
+        search_bar=ttk.Frame(p);search_bar.pack(fill='x',pady=(0,7))
         search=tk.StringVar()
-        ttk.Label(bar,text='Search SKU / barcode / product:').pack(side='left',padx=3)
-        ttk.Entry(bar,textvariable=search,width=26).pack(side='left',padx=4)
-        tree=self.table(p,('ID','SKU','Barcode','Name','Supplier','Description','Price','Cost','Stock','Image'))
+        ttk.Label(search_bar,text='Search SKU / barcode / product:').pack(side='left',padx=3)
+        ttk.Entry(search_bar,textvariable=search,width=26).pack(side='left',padx=4)
+        bar=ResponsiveToolbar(p);bar.pack(fill='x')
+        tree=self.table(p,('ID','SKU','Barcode','Name','Supplier','Description','Price','Cost','Stock','Image','Barcode PNG'))
+        tree.configure(selectmode='extended')
         def refresh(*_):
             tree.delete(*tree.get_children())
             term='%'+search.get().strip()+'%'
@@ -817,7 +822,8 @@ class PhoenixLedger(BaseApp):
             for r in self.db.execute(sql,(term,term,term,term)):
                 tree.insert('','end',values=(r['id'],r['sku'],r['barcode'],r['name'],
                      r['supplier_name'] or 'Unassigned',r['description'],money(r['price']),
-                     money(r['cost']),r['qty'],'Yes' if r['image_path'] else ''))
+                     money(r['cost']),r['qty'],'Yes' if r['image_path'] else '',
+                     'Yes' if r['barcode_image_path'] and Path(r['barcode_image_path']).is_file() else ''))
         search.trace_add('write',refresh)
         def edit(new=False):
             product_id=None if new else self.selected(tree)
@@ -887,14 +893,94 @@ class PhoenixLedger(BaseApp):
                 img=Image.open(r['image_path']);img.thumbnail((700,500));photo=ImageTk.PhotoImage(img)
             except ImportError:photo=tk.PhotoImage(file=r['image_path'])
             label=tk.Label(win,image=photo);label.image=photo;label.pack(padx=10,pady=10)
+        def product_id_from_selection():
+            return self.selected(tree)
+        def attach_barcode():
+            product_id=product_id_from_selection()
+            path=filedialog.askopenfilename(parent=self.root,
+                title='Select product barcode PNG',filetypes=[('PNG barcode image','*.png')])
+            if not path:return
+            attach_barcode_png(self.db,product_id,path,DATA)
+            refresh()
+            messagebox.showinfo('Barcode attached','Barcode PNG linked to the selected product.')
+        def view_barcode():
+            product_id=product_id_from_selection()
+            row=self.db.execute('SELECT barcode_image_path FROM products WHERE id=?',(product_id,)).fetchone()
+            path=(row['barcode_image_path'] or '') if row else ''
+            if not path or not Path(path).is_file():raise ValueError('This product has no attached barcode PNG.')
+            from PIL import Image,ImageTk
+            win=tk.Toplevel(self.root);win.title('Product barcode PNG')
+            with Image.open(path) as img:
+                img.thumbnail((760,380));photo=ImageTk.PhotoImage(img.copy())
+            label=tk.Label(win,image=photo);label.image=photo;label.pack(padx=15,pady=15)
+        def print_stickers():
+            selected=tree.selection()
+            if not selected:raise ValueError('Select one or more products (Ctrl/Shift-click) first.')
+            ids=[int(tree.item(item,'values')[0]) for item in selected]
+            open_barcode_print_dialog(self.root,self.db,ids)
+
+        # Direct in-grid editing. Double-click any editable cell, then press Enter.
+        direct={'SKU':'sku','Barcode':'barcode','Name':'name',
+                'Supplier':'supplier_id','Description':'description','Price':'price',
+                'Cost':'cost','Stock':'qty'}
+        def edit_inline(event):
+            item=tree.identify_row(event.y)
+            col_id=tree.identify_column(event.x)
+            if not item or not col_id:return
+            col_number=int(col_id[1:])-1
+            column=tree['columns'][col_number]
+            field=direct.get(column)
+            if field is None:return
+            rect=tree.bbox(item,col_id)
+            if not rect:return
+            product_id=int(tree.item(item,'values')[0])
+            old_value=tree.item(item,'values')[col_number]
+            if field=='supplier_id':
+                choices=supplier_choices(self.db)
+                names=['Unassigned']+[f"{r['name']} (#{r['id']})" for r in choices]
+                entry=ttk.Combobox(tree,values=names,state='readonly')
+                current=names.index(old_value) if old_value in names else 0
+                entry.current(current)
+            else:
+                entry=ttk.Entry(tree)
+                entry.insert(0,str(old_value))
+            x,y,w,h=rect
+            entry.place(x=x,y=y,width=max(w,75),height=h)
+            entry.focus_set()
+            if field!='supplier_id':entry.selection_range(0,'end')
+            state={'closed':False}
+            def close(save):
+                if state['closed']:return
+                state['closed']=True
+                try:
+                    if save:
+                        value=entry.get().strip()
+                        if field=='supplier_id':
+                            idx=names.index(value)
+                            value=choices[idx-1]['id'] if idx>0 else None
+                        edit_product_field(self.db,product_id,field,value)
+                except (ValueError,sqlite3.IntegrityError) as exc:
+                    messagebox.showerror('Edit product',str(exc),parent=self.root)
+                finally:
+                    entry.destroy()
+                    refresh()
+            entry.bind('<Return>',lambda e:close(True))
+            entry.bind('<Escape>',lambda e:close(False))
+            entry.bind('<FocusOut>',lambda e:close(True))
+            return 'break'
+        tree.bind('<Double-1>',edit_inline,add='+')
+        ttk.Label(p,text='Tip: Double-click a SKU, barcode, name, supplier, description, price, cost or stock cell to edit it directly. Ctrl/Shift-click selects products for stickers.',
+                  wraplength=1000).pack(anchor='w',pady=(3,0))
         self.register_home_action('product.add',lambda:edit(True))
         self.register_home_action('product.edit',edit,tree)
         self.register_home_action('product.import',lambda:self.import_excel_dialog('products'))
         self.button(bar,'Add product',lambda:edit(True));self.button(bar,'Edit',edit)
         self.button(bar,'Import products from Excel',lambda:self.import_excel_dialog('products'))
         self.button(bar,'Attach image',attach_image);self.button(bar,'View image',view_image)
+        self.button(bar,'Attach barcode PNG',attach_barcode);self.button(bar,'View barcode PNG',view_barcode)
+        self.button(bar,'Print barcode stickers',print_stickers)
         self.button(bar,'Export catalog CSV',lambda:self.export('''SELECT p.sku,p.barcode,p.name,p.description,
-            p.price/100.0 AS price,p.cost/100.0 AS cost,p.qty,s.name AS supplier,p.image_path
+            p.price/100.0 AS price,p.cost/100.0 AS cost,p.qty,s.name AS supplier,p.image_path,p.barcode_image_path
             FROM products p LEFT JOIN suppliers s ON s.id=p.supplier_id'''))
         ttk.Label(p,text='Select a primary supplier to include a product in that supplier’s purchase orders.').pack(anchor='w')
         refresh()
