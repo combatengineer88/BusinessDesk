@@ -105,11 +105,13 @@ def receive_po(db, po_id, quantities, received_on=None, notes=''):
         receipt_id=db.execute('INSERT INTO po_receipts(po_id,received_on,total,notes) VALUES(?,?,?,?)',
                               (po_id,when,total,str(notes or ''))).lastrowid
         from inventory_management import set_change_context, clear_change_context
+        from inventory_costing import update_inventory_basis_on_receipt
         set_change_context(db,'po_receipt',f'Received PO #{po_id} / receipt #{receipt_id}')
         for line,qty in received:
             db.execute('INSERT INTO po_receipt_lines(receipt_id,po_item_id,qty,unit_cost) VALUES(?,?,?,?)',
                        (receipt_id,line['id'],qty,line['unit_cost']))
             db.execute('UPDATE po_items SET received_qty=received_qty+? WHERE id=?',(qty,line['id']))
+            update_inventory_basis_on_receipt(db,line['product_id'],qty,line['unit_cost'])
             db.execute('UPDATE products SET qty=qty+? WHERE id=?',(qty,line['product_id']))
         clear_change_context(db)
         outstanding=db.execute('SELECT count(*) FROM po_items WHERE po_id=? AND received_qty<qty',(po_id,)).fetchone()[0]

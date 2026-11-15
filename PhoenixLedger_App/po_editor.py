@@ -7,6 +7,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 from core_v1 import cents, money
+from inventory_costing import quote_for_qty
 from supplier_catalog import (supplier_choices, products_for_supplier,
                               create_supplier_po, update_supplier_po)
 
@@ -98,6 +99,8 @@ class PurchaseOrderEditor:
         self.unit_cost = tk.StringVar()
         self.quantity_entry = ttk.Entry(controls,textvariable=self.quantity,width=11)
         self.quantity_entry.grid(row=1,column=1,padx=(10,0),sticky='ew',pady=(3,5))
+        self.quantity_entry.bind('<FocusOut>',self.quantity_changed)
+        self.quantity_entry.bind('<KeyRelease>',self.quantity_changed)
         self.cost_entry = ttk.Entry(controls,textvariable=self.unit_cost,width=15)
         self.cost_entry.grid(row=1,column=2,padx=(10,0),sticky='ew',pady=(3,5))
         ttk.Button(controls,text='Add Product',command=self.add_product).grid(row=1,column=3,padx=(12,0))
@@ -158,6 +161,7 @@ class PurchaseOrderEditor:
 
     def load_products(self):
         self.products=[]
+        self._last_price_key=None
         if self.supplier_id is not None:
             self.products=products_for_supplier(self.db,self.supplier_id)
             if self.original_products:
@@ -175,7 +179,19 @@ class PurchaseOrderEditor:
         index=self.product_select.current()
         if index>=0:
             product=self.products[index]
-            self.unit_cost.set(f'{product["cost"]/100:.2f}')
+            self.quantity_changed()
+
+    def quantity_changed(self,event=None):
+        """Suggest a tier price for the entered quantity; user can still edit cost."""
+        index=self.product_select.current()
+        if index<0:return
+        raw=self.quantity.get().strip()
+        if not raw.isdecimal() or int(raw)<1:return
+        key=(self.products[index]['id'],int(raw))
+        if getattr(self,'_last_price_key',None)==key:return
+        price,source=quote_for_qty(self.db,key[0],key[1])
+        self.unit_cost.set(f'{price/100:.2f}')
+        self._last_price_key=key
 
     def validate_inputs(self):
         try:
@@ -217,6 +233,7 @@ class PurchaseOrderEditor:
         qty,cost=self.lines[pid]
         self.quantity.set(str(qty))
         self.unit_cost.set(f'{cost/100:.2f}')
+        self._last_price_key=(pid,qty)
         for i,product in enumerate(self.products):
             if product['id']==pid:
                 self.product_select.current(i)

@@ -21,6 +21,8 @@ from template_editor import open_template_editor
 from visual_templates import load as load_visual_template, render as render_visual_document
 from visual_template_editor import open_visual_template_editor
 from modern_theme import apply as apply_modern_theme, SLATE as HEADER_BG
+from catalog_csv import export_catalog_view
+from context_actions import install_context_menu
 from home_workspace import HomeWorkspace
 from responsive_ui import ResponsiveToolbar, scrollable_page
 from report_export import export_report_pdf
@@ -33,8 +35,10 @@ from supplier_management import ensure_schema as ensure_supplier_schema, save_su
 from inventory_management import (ensure_schema as ensure_movement_schema, inventory_summary,
     set_change_context, clear_change_context, approve_reorder_draft)
 from inventory_dialogs import (scan_to_adjust, show_history, configure_inventory_policy, review_reorders)
+from inventory_costing import ensure_schema as ensure_cost_schema, set_bulk_quote, set_manual_cost, margin_info, quote_for_qty
+from costing_dialogs import open_bulk_pricing_dialog
 
-VERSION = '3.4.0'
+VERSION = '3.6.0'
 BUSINESS = 'TDZIGNS LLC'
 RELEASE_MANIFEST_URL = 'https://github.com/combatengineer88/BusinessDesk/releases/latest/download/update_manifest.json'
 TRUSTED_RELEASE_PREFIX = 'https://github.com/combatengineer88/BusinessDesk/releases/download/'
@@ -138,6 +142,7 @@ def schema(db):
     ensure_account_schema(db)
     ensure_inventory_schema(db)
     ensure_movement_schema(db)
+    ensure_cost_schema(db)
     db.commit()
 
 
@@ -181,7 +186,14 @@ class PhoenixLedger(BaseApp):
     def __init__(self):
         super().__init__()
         apply_modern_theme(self.root)
-        self.root.geometry('1350x840')
+        # Open maximized in Windows (not exclusive fullscreen: keep taskbar and close controls).
+        # On X11 or other desktops use the available work area as a fallback.
+        try:
+            self.root.state('zoomed')
+        except tk.TclError:
+            try:self.root.attributes('-zoomed',True)
+            except tk.TclError:
+                self.root.geometry(f'{self.root.winfo_screenwidth()}x{self.root.winfo_screenheight()}+0+0')
         self.root.title(f'{BUSINESS} | PhoenixLedger {VERSION}')
         # Health acknowledgement to the external updater once the login window is visible.
         self.root.after(400, lambda:signal_ready(DATA, VERSION, Path(sys.executable).resolve()))
@@ -619,6 +631,10 @@ class PhoenixLedger(BaseApp):
         if self.user['role']=='admin':
             self.button(bar,'Import suppliers from Excel',import_suppliers)
         self.button(bar,'Refresh suppliers',refresh)
+        supplier_actions=[('Edit supplier',edit),('Add supplier',lambda:edit(True),False),
+                          ('Refresh supplier list',refresh,False)]
+        if self.user['role']=='admin':supplier_actions.append(('Import suppliers from Excel',import_suppliers,False))
+        install_context_menu(tree,supplier_actions,self.safe)
         tree.bind('<Double-1>',lambda event:self.safe(edit))
         search.trace_add('write',refresh)
         refresh()
@@ -684,6 +700,12 @@ class PhoenixLedger(BaseApp):
         self.button(bar,'Customer product prices',lambda:self.customer_price_manager(self.selected(tree)))
         self.button(bar,'Credit account',lambda:self.customer_credit_manager(self.selected(tree)))
         self.button(bar,'Import customers from Excel',lambda:self.import_excel_dialog('customers'))
+        install_context_menu(tree,[('Edit customer',edit),
+            ('Customer-specific prices',lambda:self.customer_price_manager(self.selected(tree))),
+            ('Customer credit account',lambda:self.customer_credit_manager(self.selected(tree))),None,
+            ('Add customer',lambda:edit(True),False),
+            ('Import customers from Excel',lambda:self.import_excel_dialog('customers'),False),
+        ],self.safe)
         refresh()
 
     def customer_price_manager(self,customer_id):
@@ -842,7 +864,7 @@ class PhoenixLedger(BaseApp):
         scan_entry=ttk.Entry(search_bar,textvariable=scan_code,width=18)
         scan_entry.pack(side='left',padx=3)
         bar=ResponsiveToolbar(p);bar.pack(fill='x')
-        tree=self.table(p,('ID','SKU','Barcode','Name','Supplier','Description','Price','Cost','Stock',
+        tree=self.table(p,('ID','SKU','Barcode','Name','Supplier','Description','Price','Reorder Cost','Item Cost','Margin %','Stock',
                            'Reorder at','Reorder qty','Type','Bin','Image','Barcode PNG'))
         tree.configure(selectmode='extended')
         def refresh(*_):
@@ -870,9 +892,12 @@ class PhoenixLedger(BaseApp):
                 count+=1
                 tree.insert('','end',values=(r['id'],r['sku'],r['barcode'],r['name'],
                      r['supplier_name'] or 'Unassigned',r['description'],money(r['price']),
-                     money(r['cost']),r['qty'],r['reorder_point'],r['reorder_qty'],
-                     r['stock_mode'],r['bin_location'],'Yes' if r['image_path'] else '',
-                     'Yes' if r['barcode_image_path'] and Path(r['barcode_image_path']).is_file() else ''))
+                     ('—' if r['reorder_cost_total'] is None else money(r['reorder_cost_total'])),
+                     money(r['cost']),
+                     ('—' if r['price']==0 else f"{margin_info(r['price'],r['cost'])['margin_percent']:.1f}%"),
+                     r['qty'],r['reorder_point'],r['reorder_qty'],
+                     r['stock_mode'],r['bin_location'],'Yes' if r['image_path'] and Path(r['image_path']).is_file() else 'No',
+                     'Yes' if r['barcode_image_path'] and Path(r['barcode_image_path']).is_file() else 'No'))
             metrics=inventory_summary(self.db)
             for (_,var),value in zip(cards,(str(metrics['count']),str(metrics['low_count']),
                                         str(metrics['out_count']),money(metrics['stock_value']))):var.set(value)
@@ -917,6 +942,14 @@ class PhoenixLedger(BaseApp):
                     with self.db:
                         set_change_context(self.db,'manual_edit','Edited product details / stock',self.user['username'])
                         try:
+                            if not new and cost != record['cost']:
+                                self.db.execute('INSERT INTO product_cost_history '
+                                    '(product_id,prior_cost,new_cost,prior_bulk_total,new_bulk_total,reorder_qty,change_type,actor,note) '
+                                    'VALUES(?,?,?,?,?,?,?,?,?)',
+                                    (product_id,record['cost'],cost,record.get('reorder_cost_total'),None,
+                                     record['reorder_qty'],'manual_override',self.user['username'],
+                                     'Product editor item cost override'))
+                                self.db.execute('UPDATE products SET reorder_cost_total=NULL WHERE id=?',(product_id,))
                             if new:
                                 self.db.execute('''INSERT INTO products(sku,barcode,name,description,price,cost,qty,supplier_id)
                                                    VALUES(?,?,?,?,?,?,?,?)''',values)
@@ -981,7 +1014,8 @@ class PhoenixLedger(BaseApp):
         # Direct in-grid editing. Double-click any editable cell, then press Enter.
         direct={'SKU':'sku','Barcode':'barcode','Name':'name',
                 'Supplier':'supplier_id','Description':'description','Price':'price',
-                'Cost':'cost','Stock':'qty'}
+                'Reorder Cost':'reorder_cost_total','Reorder qty':'reorder_qty',
+                'Item Cost':'cost','Stock':'qty'}
         def edit_inline(event):
             item=tree.identify_row(event.y)
             col_id=tree.identify_column(event.x)
@@ -1028,7 +1062,7 @@ class PhoenixLedger(BaseApp):
             entry.bind('<FocusOut>',lambda e:close(True))
             return 'break'
         tree.bind('<Double-1>',edit_inline,add='+')
-        ttk.Label(p,text='Tip: Double-click a SKU, barcode, name, supplier, description, price, cost or stock cell to edit it directly. Ctrl/Shift-click selects products for stickers.',
+        ttk.Label(p,text='Tip: Double-click Reorder Cost or Reorder qty to recalculate Item Cost. Double-click other editable fields to change them. Ctrl/Shift-click selects products for stickers.',
                   wraplength=1000).pack(anchor='w',pady=(3,0))
         self.register_home_action('product.add',lambda:edit(True))
         self.register_home_action('product.edit',edit,tree)
@@ -1052,6 +1086,10 @@ class PhoenixLedger(BaseApp):
         def reorders():
             review_reorders(self.root,self.db,refresh)
         scan_entry.bind('<Return>',lambda ev:self.safe(scan_adjust))
+        def pricing():
+            product_id=self.selected(tree)
+            open_bulk_pricing_dialog(self.root,self.db,product_id,actor=self.user['username'],on_saved=refresh)
+        self.button(bar,'Bulk Cost & Pricing',pricing)
         self.button(bar,'Scan to Adjust',scan_adjust)
         self.button(bar,'Movement History',history)
         self.button(bar,'Stock & Reorder Rules',policies)
@@ -1059,9 +1097,32 @@ class PhoenixLedger(BaseApp):
         self.register_home_action('product.scan',scan_adjust)
         self.register_home_action('product.movements',history)
         self.register_home_action('product.reorders',reorders)
-        self.button(bar,'Export catalog CSV',lambda:self.export('''SELECT p.sku,p.barcode,p.name,p.description,
-            p.price/100.0 AS price,p.cost/100.0 AS cost,p.qty,s.name AS supplier,p.image_path,p.barcode_image_path
-            FROM products p LEFT JOIN suppliers s ON s.id=p.supplier_id'''))
+        def export_catalog_csv():
+            path=filedialog.asksaveasfilename(parent=self.root,defaultextension='.csv',
+                initialfile='PhoenixLedger_Product_Catalog.csv',title='Export the Products table',
+                filetypes=[('CSV spreadsheet','*.csv')])
+            if not path:return
+            count=export_catalog_view(tree,path)
+            messagebox.showinfo('Products exported',
+                f'{count} displayed products exported to CSV.\n'
+                'Columns match the Products tab; image and barcode attachments appear as Yes/No.',
+                parent=self.root)
+        self.button(bar,'Export catalog CSV',export_catalog_csv)
+        def copy_selected_skus():
+            selected=tree.selection()
+            if not selected:raise ValueError('Select a product first.')
+            text='\n'.join(str(tree.item(item,'values')[1]) for item in selected)
+            self.root.clipboard_clear();self.root.clipboard_append(text)
+        install_context_menu(tree,[
+            ('Edit product',edit),('Bulk Cost & Pricing',pricing),
+            ('Stock & Reorder Rules',policies),('Scan to Adjust',scan_adjust,False),
+            ('Movement History',history),None,
+            ('Attach product image',attach_image),('View product image',view_image),
+            ('Attach barcode PNG',attach_barcode),('View barcode PNG',view_barcode),
+            ('Print selected barcode stickers',print_stickers),None,
+            ('Copy SKU(s)',copy_selected_skus),('Export displayed products to CSV',export_catalog_csv,False),
+            ('Add new product',lambda:edit(True),False),
+        ],self.safe)
         ttk.Label(p,textvariable=inventory_hint,wraplength=950).pack(anchor='w',pady=(4,0))
         ttk.Label(p,text='Set stock mode to made_to_order or supplier_direct to exclude non-stocked catalog items from reorder alerts.',
                   wraplength=1000).pack(anchor='w')
@@ -1123,6 +1184,10 @@ class PhoenixLedger(BaseApp):
         self.button(bar,'Convert estimate to invoice',convert_selected)
         self.button(bar,'Record invoice payment',pay_selected)
         self.button(bar,'Export selected branded PDF',export_pdf)
+        install_context_menu(tree,[('Export selected PDF',export_pdf),
+            ('Convert estimate to invoice',convert_selected),('Record invoice payment',pay_selected),
+            None,('New estimate / invoice',self._home_actions['estimate.new'][0],False),
+        ],self.safe)
         if self.user['role']=='admin':self.button(bar,'Customize PDF templates',self.edit_document_templates)
     def select_po_supplier(self):
         """Pick a saved supplier by name; keep the numeric ID internal."""
@@ -1252,6 +1317,23 @@ class PhoenixLedger(BaseApp):
         dialog.wait_window()
         return result['items']
 
+    def expenses(self,p):
+        super().expenses(p)
+        def find_tree(widget):
+            if isinstance(widget,ttk.Treeview):return widget
+            for child in widget.winfo_children():
+                found=find_tree(child)
+                if found:return found
+            return None
+        tree=find_tree(p)
+        def add_expense():
+            self._home_actions['expense.add'][0]()
+        def export_expenses():
+            self.export('SELECT spent_on,category,vendor,description,amount/100.0 AS amount FROM expenses')
+        if tree:
+            install_context_menu(tree,[('Add expense',add_expense,False),
+                                       ('Export expenses CSV',export_expenses,False)],self.safe)
+
     def purchase_orders(self,p):
         bar=ResponsiveToolbar(p);bar.pack(fill='x')
         tree=self.table(p,('ID','Supplier','Ordered','Status','Ordered total','Received value','Unpaid AP'))
@@ -1309,6 +1391,11 @@ class PhoenixLedger(BaseApp):
         self.button(bar,'Pay supplier',supplier_payment)
         self.button(bar,'Export PO PDF',pdf)
         if self.user['role']=='admin':self.button(bar,'Customize PO template',self.edit_document_templates)
+        install_context_menu(tree,[('Edit PO',edit),('Approve draft PO',approve_draft),
+            ('Receive entire PO',receive_entire),('Receive partial PO',receive_partial),
+            ('Pay supplier',supplier_payment),('Export PO PDF',pdf),None,
+            ('Create new PO',create,False),
+        ],self.safe)
         tree.bind('<Double-1>',lambda event:self.safe(edit))
         ttk.Label(p,text='Partial receipts update stock and Accounts Payable for delivered goods only. '
                   'Supplier payments reduce outstanding AP. Draft POs must be approved before receiving; POs with receipts are locked from editing.',wraplength=900).pack(anchor='w')

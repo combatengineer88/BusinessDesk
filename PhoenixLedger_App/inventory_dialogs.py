@@ -207,7 +207,7 @@ def review_reorders(parent,db,on_created=None):
         tree.delete(*tree.get_children())
         for r in current:
             tree.insert('','end',values=(r['supplier_name'] or 'UNASSIGNED',r['sku'],r['name'],
-                r['qty'],r['on_order'],r['reorder_point'],r['suggested_qty'],money(r['cost'])))
+                r['qty'],r['on_order'],r['reorder_point'],r['suggested_qty'],money(r['unit_cost'])))
         count=sum(1 for r in current if r['supplier_id'] is None)
         status.set(f'{len(current)} suggested item(s); {count} require a supplier assignment before a PO can be created.')
     def create():

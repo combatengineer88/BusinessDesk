@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date
+from inventory_costing import suggested_order_qty,quote_for_qty,rounded_cents
 
 STOCK_MODES = ('stocked', 'made_to_order', 'supplier_direct')
 
@@ -137,6 +138,19 @@ def update_policy(db, product_ids, reorder_point, reorder_qty, stock_mode='stock
         for product_id in ids:
             if db.execute('SELECT 1 FROM products WHERE id=?',(product_id,)).fetchone() is None:
                 raise ValueError(f'Product #{product_id} was not found.')
+            prior=db.execute('SELECT cost,reorder_cost_total,reorder_qty FROM products WHERE id=?',(product_id,)).fetchone()
+            bulk=prior['reorder_cost_total']
+            if bulk is not None:
+                if reorder_qty==0:
+                    raise ValueError('A product with a bulk reorder quote needs a reorder quantity of at least 1.')
+                new_cost=rounded_cents(int(bulk),reorder_qty)
+                if new_cost!=prior['cost'] or reorder_qty!=prior['reorder_qty']:
+                    db.execute('''INSERT INTO product_cost_history(product_id,prior_cost,new_cost,
+                        prior_bulk_total,new_bulk_total,reorder_qty,change_type,actor,note)
+                        VALUES(?,?,?,?,?,?,?,?,?)''',
+                        (product_id,prior['cost'],new_cost,bulk,bulk,reorder_qty,
+                         'bulk_quote','reorder_rules','Reorder quantity changed in stock policy'))
+                    db.execute('UPDATE products SET cost=? WHERE id=?',(new_cost,product_id))
             if bin_location is None:
                 db.execute('UPDATE products SET reorder_point=?,reorder_qty=?,stock_mode=? WHERE id=?',
                            (reorder_point,reorder_qty,stock_mode,product_id))
@@ -150,7 +164,7 @@ def inventory_summary(db):
     row=db.execute('''SELECT count(*) AS count,
         sum(CASE WHEN stock_mode='stocked' AND qty=0 THEN 1 ELSE 0 END) AS out_count,
         sum(CASE WHEN stock_mode='stocked' AND qty<=reorder_point THEN 1 ELSE 0 END) AS low_count,
-        coalesce(sum(CASE WHEN stock_mode='stocked' THEN qty*cost ELSE 0 END),0) AS stock_value,
+        coalesce(sum(CASE WHEN stock_mode='stocked' THEN qty*COALESCE(inventory_unit_cost,cost) ELSE 0 END),0) AS stock_value,
         sum(CASE WHEN stock_mode<>'stocked' THEN 1 ELSE 0 END) AS nonstock_count
         FROM products''').fetchone()
     return {k:int(row[k] or 0) for k in row.keys()}
@@ -159,7 +173,7 @@ def inventory_summary(db):
 def reorder_recommendations(db):
     """Only stocked products below reorder point; subtract unreceived open/draft POs."""
     sql='''SELECT p.id,p.sku,p.name,p.supplier_id,s.name AS supplier_name,
-        p.qty,p.cost,p.reorder_point,p.reorder_qty,
+        p.qty,p.cost,p.reorder_point,p.reorder_qty,p.case_pack_qty,p.min_order_qty,
         COALESCE((SELECT SUM(l.qty-COALESCE(l.received_qty,0))
           FROM po_items l JOIN purchase_orders o ON o.id=l.po_id
           WHERE l.product_id=p.id AND o.status IN ('Draft','Open','Partially Received')),0) AS on_order
@@ -172,7 +186,10 @@ def reorder_recommendations(db):
         target=int(r['reorder_point']) + int(r['reorder_qty'])
         needed=max(0,target-int(r['qty'])-int(r['on_order']))
         if needed:
-            row.update({'target_qty':target,'suggested_qty':needed})
+            suggested=suggested_order_qty(needed,int(row['case_pack_qty']),int(row['min_order_qty']))
+            unit_cost,price_source=quote_for_qty(db,row['id'],suggested)
+            row.update({'target_qty':target,'suggested_qty':suggested,'unit_cost':unit_cost,
+                        'price_source':price_source})
             recommendations.append(row)
     return recommendations
 
@@ -194,7 +211,7 @@ def create_reorder_drafts(db):
                 grouped[row['supplier_id']].append(row)
         created=[]
         for supplier_id,items in sorted(grouped.items()):
-            total=sum(int(r['suggested_qty'])*int(r['cost']) for r in items)
+            total=sum(int(r['suggested_qty'])*int(r['unit_cost']) for r in items)
             cursor=db.execute('''INSERT INTO purchase_orders
                   (supplier_id,ordered_on,status,notes,total) VALUES(?,?,?,?,?)''',
                   (supplier_id,date.today().isoformat(),'Draft',
@@ -202,7 +219,7 @@ def create_reorder_drafts(db):
             po_id=cursor.lastrowid
             db.executemany('''INSERT INTO po_items(po_id,product_id,qty,unit_cost)
                               VALUES(?,?,?,?)''',
-                           [(po_id,r['id'],r['suggested_qty'],r['cost']) for r in items])
+                           [(po_id,r['id'],r['suggested_qty'],r['unit_cost']) for r in items])
             created.append(po_id)
     return created,missing
 

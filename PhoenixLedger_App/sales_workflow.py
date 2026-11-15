@@ -39,7 +39,7 @@ def convert_estimate(db, document_id, charge_credit=False):
             db.execute('INSERT INTO journal_lines(journal_id,account,debit,credit) VALUES(?,?,?,?)',(journal,'Sales Tax Payable',0,doc['tax']))
         for item in db.execute('SELECT id,product_id,qty FROM document_items WHERE document_id=?',(document_id,)).fetchall():
             if item['product_id'] is None: continue
-            cost=db.execute('SELECT cost FROM products WHERE id=?',(item['product_id'],)).fetchone()['cost']*item['qty']
+            cost=db.execute('SELECT COALESCE(inventory_unit_cost,cost) AS cost FROM products WHERE id=?',(item['product_id'],)).fetchone()['cost']*item['qty']
             j=db.execute('INSERT INTO journal(posted_on,memo,source_type,source_id) VALUES(?,?,?,?)',
                          (date.today().isoformat(),f'Cost of goods for invoice item #{item["id"]}','cogs',item['id'])).lastrowid
             db.execute('INSERT INTO journal_lines(journal_id,account,debit,credit) VALUES(?,?,?,?)',(j,'Cost of Goods Sold',cost,0))

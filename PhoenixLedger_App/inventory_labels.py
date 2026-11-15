@@ -31,7 +31,7 @@ LABEL_FORMATS = {
 }
 
 
-EDITABLE = frozenset(('sku', 'barcode', 'name', 'description', 'price', 'cost', 'qty', 'supplier_id'))
+EDITABLE = frozenset(('sku', 'barcode', 'name', 'description', 'price', 'cost', 'qty', 'supplier_id', 'reorder_cost_total', 'reorder_qty'))
 
 
 def ensure_inventory_schema(db):
@@ -48,7 +48,21 @@ def edit_product_field(db, product_id, field, entered, actor=''):
         raise ValueError('This product column cannot be edited inline.')
     if not db.execute('SELECT 1 FROM products WHERE id=?', (product_id,)).fetchone():
         raise ValueError('The product no longer exists.')
-    if field in ('price', 'cost'):
+    if field in ('reorder_cost_total', 'reorder_qty', 'cost'):
+        from core_v1 import cents
+        from inventory_costing import set_bulk_quote, set_manual_cost
+        product=db.execute('SELECT reorder_qty,reorder_cost_total FROM products WHERE id=?',(product_id,)).fetchone()
+        if field == 'cost':return set_manual_cost(db,product_id,cents(entered),actor)
+        if field == 'reorder_cost_total':
+            return set_bulk_quote(db,product_id,int(product['reorder_qty']),cents(entered),actor=actor)
+        value=str(entered).strip()
+        if not value.isdecimal() or int(value)<1:raise ValueError('Reorder quantity must be a positive whole number.')
+        if product['reorder_cost_total'] is not None:
+            set_bulk_quote(db,product_id,int(value),int(product['reorder_cost_total']),actor=actor)
+        else:
+            with db:db.execute('UPDATE products SET reorder_qty=? WHERE id=?',(int(value),product_id))
+        return int(value)
+    if field == 'price':
         from core_v1 import cents
         value = cents(entered)
     elif field == 'qty':

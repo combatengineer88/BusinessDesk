@@ -136,10 +136,18 @@ class GuiTests(TestCase):
                 buttons=list(self.buttons(bar))
                 if not buttons:continue
                 self.assertGreater(bar.winfo_width(),100)
-                for button in buttons:
-                    self.assertEqual(button.winfo_manager(),'grid')
-                    self.assertLessEqual(button.winfo_x()+button.winfo_width(),bar.winfo_width()+3,
-                        f'{tabname}: {button.cget("text")} is clipped')
+                overflow_labels = [bar._more_menu.entrycget(i,'label')
+                    for i in range((bar._more_menu.index('end') or -1)+1)]
+                for button in bar._buttons:
+                    if button.winfo_manager() == 'grid':
+                        self.assertLessEqual(button.winfo_x()+button.winfo_width(),bar.winfo_width()+3,
+                            f'{tabname}: {button.cget("text")} is clipped')
+                    else:
+                        self.assertIn(button.cget('text'),overflow_labels,
+                            f'{tabname}: {button.cget("text")} missing from More actions')
+                if overflow_labels:
+                    self.assertEqual(bar._more_button.winfo_manager(),'grid')
+                    self.assertLessEqual(bar._more_button.winfo_x()+bar._more_button.winfo_width(),bar.winfo_width()+3)
             self.assertTrue(any(isinstance(w,tk.Canvas) for w in self.widgets(tab,tk.Canvas)))
 
     def test_save_estimate_button_visible_and_return_selected_line(self):

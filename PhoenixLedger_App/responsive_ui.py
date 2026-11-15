@@ -1,4 +1,4 @@
-"""Responsive action toolbar: Tk grid wraps buttons instead of clipping them."""
+"""Responsive action toolbar with compact overflow instead of clipped controls."""
 import tkinter as tk
 from tkinter import ttk
 
@@ -6,29 +6,65 @@ class ResponsiveToolbar(ttk.Frame):
     def __init__(self,parent,**kwargs):
         super().__init__(parent,**kwargs)
         self._buttons=[]
+        self._actions=[]
         self._columns=0
-        self.bind('<Configure>',self._reflow)
+        self._more_menu=tk.Menu(self,tearoff=False)
+        self._more_button=ttk.Button(self,text='More actions ▾',command=self._open_more)
+        self._cached_shape=None
+        self.bind('<Configure>',self._reflow,add='+')
+        self._host_root=self.winfo_toplevel()
+        self._root_bind_id=self._host_root.bind('<Configure>',self._root_reflow,add='+')
+        self.bind('<Destroy>',self._unbind_root,add='+')
+
+    def _unbind_root(self,event):
+        if event.widget is self and self._host_root.winfo_exists():
+            self._host_root.unbind('<Configure>',self._root_bind_id)
 
     def add_action(self,label,callback,accent=False):
         button=ttk.Button(self,text=label,command=callback,
                           style='Accent.TButton' if accent else 'TButton')
         self._buttons.append(button)
-        if self.winfo_width()>=40:self._reflow()
+        self._actions.append((label,callback))
+        self.after_idle(self._reflow)
         return button
+
+    def _root_reflow(self,event):
+        if self.winfo_exists() and event.widget is self._host_root:
+            self.after_idle(self._reflow)
+
+    def _open_more(self):
+        self._more_menu.tk_popup(self._more_button.winfo_rootx(),
+                                 self._more_button.winfo_rooty()+self._more_button.winfo_height())
+        self._more_menu.grab_release()
 
     def _reflow(self,event=None):
         if not self.winfo_exists() or not self._buttons:return
         width=self.winfo_width()
-        if width<40:return
-        desired=min(340,max(160,max(b.winfo_reqwidth() for b in self._buttons)+16))
-        columns=max(1,min(len(self._buttons),width//(desired+12)))
-        if columns==self._columns:return
-        for child in self._buttons:child.grid_forget()
-        for index in range(max(self._columns,columns)):
-            self.columnconfigure(index,weight=0,uniform='')
-        for index in range(columns):self.columnconfigure(index,weight=1,uniform='actions')
-        for index,button in enumerate(self._buttons):
-            button.grid(row=index//columns,column=index%columns,sticky='ew',padx=4,pady=4)
+        if width<100:return
+        top=self.winfo_toplevel()
+        available_height=top.winfo_height()
+        max_rows=2 if available_height<750 else 3
+        desired=min(255,max(145,max(b.winfo_reqwidth() for b in self._buttons)+6))
+        columns=max(1,min(len(self._buttons),width//(desired+8)))
+        max_shown=columns*max_rows
+        overflow=len(self._buttons)>max_shown
+        if overflow:max_shown-=1  # Reserve a visible More actions button.
+        shape=(columns,max_shown,overflow)
+        if shape==self._cached_shape:return
+        self._cached_shape=shape
+        for button in self._buttons:button.grid_forget()
+        self._more_button.grid_forget()
+        for col in range(max(self._columns,columns)):
+            self.columnconfigure(col,weight=0,uniform='')
+        for col in range(columns):self.columnconfigure(col,weight=1,uniform='phoenix_actions')
+        for index,button in enumerate(self._buttons[:max_shown]):
+            button.grid(row=index//columns,column=index%columns,sticky='ew',padx=3,pady=3)
+        if overflow:
+            self._more_menu.delete(0,'end')
+            for label,callback in self._actions[max_shown:]:
+                self._more_menu.add_command(label=label,command=callback)
+            self._more_button.grid(row=max_shown//columns,column=max_shown%columns,
+                                   sticky='ew',padx=3,pady=3)
         self._columns=columns
 
 
