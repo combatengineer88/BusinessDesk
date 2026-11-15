@@ -30,8 +30,11 @@ from account_workflows import (ensure_schema as ensure_account_schema,receive_po
     po_received_value,record_supplier_payment,credit_info,validate_credit_charge)
 from account_dialogs import receive_partial_dialog,supplier_payment_dialog,credit_manager_dialog
 from supplier_management import ensure_schema as ensure_supplier_schema, save_supplier, search_suppliers
+from inventory_management import (ensure_schema as ensure_movement_schema, inventory_summary,
+    set_change_context, clear_change_context, approve_reorder_draft)
+from inventory_dialogs import (scan_to_adjust, show_history, configure_inventory_policy, review_reorders)
 
-VERSION = '3.3.0'
+VERSION = '3.4.0'
 BUSINESS = 'TDZIGNS LLC'
 RELEASE_MANIFEST_URL = 'https://github.com/combatengineer88/BusinessDesk/releases/latest/download/update_manifest.json'
 TRUSTED_RELEASE_PREFIX = 'https://github.com/combatengineer88/BusinessDesk/releases/download/'
@@ -134,6 +137,7 @@ def schema(db):
     ensure_supplier_schema(db)
     ensure_account_schema(db)
     ensure_inventory_schema(db)
+    ensure_movement_schema(db)
     db.commit()
 
 
@@ -805,12 +809,41 @@ class PhoenixLedger(BaseApp):
         self.home()
 
     def products(self,p):
+        ttk.Label(p,text='Inventory Overview',style='Section.TLabel').pack(anchor='w',pady=(0,6))
+        summary=ttk.Frame(p);summary.pack(fill='x',pady=(0,8))
+        cards=[]
+        for name in ('Active SKUs','Low stock','Out of stock','Stock value'):
+            card=ttk.Frame(summary,padding=(12,9),style='Card.TFrame')
+            ttk.Label(card,text=name,style='CardTitle.TLabel').pack(anchor='w')
+            variable=tk.StringVar(value='—')
+            ttk.Label(card,textvariable=variable,font=('Segoe UI',15,'bold'),style='CardValue.TLabel').pack(anchor='w',pady=(3,0))
+            cards.append((card,variable))
+        card_cols={'count':None}
+        def rearrange_cards(event=None):
+            count=2 if summary.winfo_width()<930 else 4
+            if card_cols['count']==count:return
+            card_cols['count']=count
+            for card,_ in cards:card.grid_forget()
+            for n in range(4):summary.columnconfigure(n,weight=1 if n<count else 0)
+            for i,(card,_) in enumerate(cards):
+                card.grid(row=i//count,column=i%count,sticky='nsew',padx=3,pady=3)
+        summary.bind('<Configure>',rearrange_cards)
         search_bar=ttk.Frame(p);search_bar.pack(fill='x',pady=(0,7))
         search=tk.StringVar()
-        ttk.Label(search_bar,text='Search SKU / barcode / product:').pack(side='left',padx=3)
-        ttk.Entry(search_bar,textvariable=search,width=26).pack(side='left',padx=4)
+        ttk.Label(search_bar,text='Search:').pack(side='left',padx=3)
+        ttk.Entry(search_bar,textvariable=search,width=25).pack(side='left',padx=4)
+        ttk.Label(search_bar,text='Show:').pack(side='left',padx=(15,4))
+        filter_mode=tk.StringVar(value='All products')
+        filter_box=ttk.Combobox(search_bar,textvariable=filter_mode,state='readonly',width=17,
+            values=('All products','Low stock','Out of stock','Needs reorder','Made to order','Supplier direct'))
+        filter_box.pack(side='left',padx=4)
+        scan_code=tk.StringVar()
+        ttk.Label(search_bar,text='Quick scan:').pack(side='left',padx=(12,3))
+        scan_entry=ttk.Entry(search_bar,textvariable=scan_code,width=18)
+        scan_entry.pack(side='left',padx=3)
         bar=ResponsiveToolbar(p);bar.pack(fill='x')
-        tree=self.table(p,('ID','SKU','Barcode','Name','Supplier','Description','Price','Cost','Stock','Image','Barcode PNG'))
+        tree=self.table(p,('ID','SKU','Barcode','Name','Supplier','Description','Price','Cost','Stock',
+                           'Reorder at','Reorder qty','Type','Bin','Image','Barcode PNG'))
         tree.configure(selectmode='extended')
         def refresh(*_):
             tree.delete(*tree.get_children())
@@ -819,11 +852,33 @@ class PhoenixLedger(BaseApp):
                 LEFT JOIN suppliers s ON s.id=p.supplier_id
                 WHERE p.sku LIKE ? OR p.barcode LIKE ? OR p.name LIKE ? OR s.name LIKE ?
                 ORDER BY p.name COLLATE NOCASE"""
+            count=0
+            mode=filter_mode.get()
+            # The filtering happens on validated DB fields rather than on formatted cells.
+            pending={r[0]:r[1] for r in self.db.execute("SELECT l.product_id, "
+                "SUM(l.qty-COALESCE(l.received_qty,0)) FROM po_items l "
+                "JOIN purchase_orders o ON o.id=l.po_id "
+                "WHERE o.status IN ('Draft','Open','Partially Received') GROUP BY l.product_id")}
             for r in self.db.execute(sql,(term,term,term,term)):
+                low=r['stock_mode']=='stocked' and r['qty']<=r['reorder_point']
+                if mode=='Low stock' and not low:continue
+                if mode=='Out of stock' and not (r['stock_mode']=='stocked' and r['qty']==0):continue
+                if mode=='Needs reorder' and not (low and r['reorder_qty']>0 and
+                        r['qty']+pending.get(r['id'],0)<r['reorder_point']+r['reorder_qty']):continue
+                if mode=='Made to order' and r['stock_mode']!='made_to_order':continue
+                if mode=='Supplier direct' and r['stock_mode']!='supplier_direct':continue
+                count+=1
                 tree.insert('','end',values=(r['id'],r['sku'],r['barcode'],r['name'],
                      r['supplier_name'] or 'Unassigned',r['description'],money(r['price']),
-                     money(r['cost']),r['qty'],'Yes' if r['image_path'] else '',
+                     money(r['cost']),r['qty'],r['reorder_point'],r['reorder_qty'],
+                     r['stock_mode'],r['bin_location'],'Yes' if r['image_path'] else '',
                      'Yes' if r['barcode_image_path'] and Path(r['barcode_image_path']).is_file() else ''))
+            metrics=inventory_summary(self.db)
+            for (_,var),value in zip(cards,(str(metrics['count']),str(metrics['low_count']),
+                                        str(metrics['out_count']),money(metrics['stock_value']))):var.set(value)
+            inventory_hint.set(f'{count} products shown  •  {metrics["low_count"]} at or below reorder point  •  All stock changes appear in Movement History')
+        inventory_hint=tk.StringVar(value='')
+        filter_box.bind('<<ComboboxSelected>>',refresh)
         search.trace_add('write',refresh)
         def edit(new=False):
             product_id=None if new else self.selected(tree)
@@ -860,12 +915,16 @@ class PhoenixLedger(BaseApp):
                     sid=options[supplier.current()-1]['id'] if supplier.current()>0 else None
                     values=(vals['sku'],vals['barcode'],vals['name'],vals['description'],unit_price,cost,quantity,sid)
                     with self.db:
-                        if new:
-                            self.db.execute('''INSERT INTO products(sku,barcode,name,description,price,cost,qty,supplier_id)
-                                               VALUES(?,?,?,?,?,?,?,?)''',values)
-                        else:
-                            self.db.execute('''UPDATE products SET sku=?,barcode=?,name=?,description=?,price=?,cost=?,qty=?,supplier_id=?
-                                               WHERE id=?''',(*values,product_id))
+                        set_change_context(self.db,'manual_edit','Edited product details / stock',self.user['username'])
+                        try:
+                            if new:
+                                self.db.execute('''INSERT INTO products(sku,barcode,name,description,price,cost,qty,supplier_id)
+                                                   VALUES(?,?,?,?,?,?,?,?)''',values)
+                            else:
+                                self.db.execute('''UPDATE products SET sku=?,barcode=?,name=?,description=?,price=?,cost=?,qty=?,supplier_id=?
+                                                   WHERE id=?''',(*values,product_id))
+                        finally:
+                            clear_change_context(self.db)
                 except (ValueError,sqlite3.IntegrityError) as exc:
                     messagebox.showerror('Product',str(exc),parent=dialog)
                     return
@@ -958,7 +1017,7 @@ class PhoenixLedger(BaseApp):
                         if field=='supplier_id':
                             idx=names.index(value)
                             value=choices[idx-1]['id'] if idx>0 else None
-                        edit_product_field(self.db,product_id,field,value)
+                        edit_product_field(self.db,product_id,field,value,actor=self.user['username'])
                 except (ValueError,sqlite3.IntegrityError) as exc:
                     messagebox.showerror('Edit product',str(exc),parent=self.root)
                 finally:
@@ -979,10 +1038,33 @@ class PhoenixLedger(BaseApp):
         self.button(bar,'Attach image',attach_image);self.button(bar,'View image',view_image)
         self.button(bar,'Attach barcode PNG',attach_barcode);self.button(bar,'View barcode PNG',view_barcode)
         self.button(bar,'Print barcode stickers',print_stickers)
+        def selected_product_ids():
+            return [int(tree.item(row,'values')[0]) for row in tree.selection()]
+        def scan_adjust():
+            win=scan_to_adjust(self.root,self.db,self.user['username'],scan_code.get())
+            win.on_inventory_changed=refresh
+            scan_code.set('')
+        def policies():
+            configure_inventory_policy(self.root,self.db,selected_product_ids(),refresh)
+        def history():
+            ids=selected_product_ids()
+            show_history(self.root,self.db,ids[0] if len(ids)==1 else None)
+        def reorders():
+            review_reorders(self.root,self.db,refresh)
+        scan_entry.bind('<Return>',lambda ev:self.safe(scan_adjust))
+        self.button(bar,'Scan to Adjust',scan_adjust)
+        self.button(bar,'Movement History',history)
+        self.button(bar,'Stock & Reorder Rules',policies)
+        self.button(bar,'Suggested Reorders',reorders)
+        self.register_home_action('product.scan',scan_adjust)
+        self.register_home_action('product.movements',history)
+        self.register_home_action('product.reorders',reorders)
         self.button(bar,'Export catalog CSV',lambda:self.export('''SELECT p.sku,p.barcode,p.name,p.description,
             p.price/100.0 AS price,p.cost/100.0 AS cost,p.qty,s.name AS supplier,p.image_path,p.barcode_image_path
             FROM products p LEFT JOIN suppliers s ON s.id=p.supplier_id'''))
-        ttk.Label(p,text='Select a primary supplier to include a product in that supplier’s purchase orders.').pack(anchor='w')
+        ttk.Label(p,textvariable=inventory_hint,wraplength=950).pack(anchor='w',pady=(4,0))
+        ttk.Label(p,text='Set stock mode to made_to_order or supplier_direct to exclude non-stocked catalog items from reorder alerts.',
+                  wraplength=1000).pack(anchor='w')
         refresh()
     def documents(self,p):
         super().documents(p)
@@ -1188,6 +1270,14 @@ class PhoenixLedger(BaseApp):
             updated=open_purchase_order_editor(self.root,self.db,po_id=po_id)
             if updated is not None:
                 refresh();messagebox.showinfo('Purchase order updated',f'PO #{updated} saved.',parent=self.root)
+        def approve_draft():
+            po_id=self.selected(tree)
+            if not messagebox.askyesno('Approve reorder draft',
+                f'Approve Draft PO #{po_id} for ordering? This changes its status to Open; it will not change stock or payments.',
+                parent=self.root):return
+            approve_reorder_draft(self.db,po_id)
+            refresh()
+            messagebox.showinfo('Purchase order approved',f'PO #{po_id} is now Open. You can send it to the supplier.',parent=self.root)
         def receive_partial():
             po_id=self.selected(tree)
             receive_partial_dialog(self.root,self.db,po_id)
@@ -1208,11 +1298,12 @@ class PhoenixLedger(BaseApp):
             path=filedialog.asksaveasfilename(defaultextension='.pdf',initialfile=f'PO_{po_id}.pdf',filetypes=[('PDF','*.pdf')])
             if path:make_pdf(self.db,'PO',po_id,path);messagebox.showinfo('Saved','Purchase order PDF exported.')
         self.register_home_action('po.new',create)
-        self.register_home_action('po.edit',edit,tree,lambda v:len(v)>3 and v[3]=='Open')
+        self.register_home_action('po.edit',edit,tree,lambda v:len(v)>3 and v[3] in ('Draft','Open'))
         self.register_home_action('po.receive',receive_entire,tree,lambda v:len(v)>3 and v[3] in ('Open','Partially Received'))
         self.register_home_action('po.partial',receive_partial,tree,lambda v:len(v)>3 and v[3] in ('Open','Partially Received'))
         self.register_home_action('supplier.payment',supplier_payment,tree,lambda v:len(v)>6 and v[6]!='$0.00')
         self.button(bar,'New PO',create);self.button(bar,'Edit selected PO',edit)
+        self.button(bar,'Approve Draft PO',approve_draft)
         self.button(bar,'Receive entire PO',receive_entire)
         self.button(bar,'Receive partial PO',receive_partial)
         self.button(bar,'Pay supplier',supplier_payment)
@@ -1220,7 +1311,7 @@ class PhoenixLedger(BaseApp):
         if self.user['role']=='admin':self.button(bar,'Customize PO template',self.edit_document_templates)
         tree.bind('<Double-1>',lambda event:self.safe(edit))
         ttk.Label(p,text='Partial receipts update stock and Accounts Payable for delivered goods only. '
-                  'Supplier payments reduce outstanding AP. POs with any receipts are locked from editing.',wraplength=900).pack(anchor='w')
+                  'Supplier payments reduce outstanding AP. Draft POs must be approved before receiving; POs with receipts are locked from editing.',wraplength=900).pack(anchor='w')
         refresh()
     def accounting(self,p):
         bar=ResponsiveToolbar(p);bar.pack(fill='x')

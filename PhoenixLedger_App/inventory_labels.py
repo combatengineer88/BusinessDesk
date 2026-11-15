@@ -42,7 +42,7 @@ def ensure_inventory_schema(db):
     db.commit()
 
 
-def edit_product_field(db, product_id, field, entered):
+def edit_product_field(db, product_id, field, entered, actor=''):
     """Validate and save a single spreadsheet-style cell, without rewriting other columns."""
     if field not in EDITABLE:
         raise ValueError('This product column cannot be edited inline.')
@@ -71,7 +71,13 @@ def edit_product_field(db, product_id, field, entered):
         if field in ('sku', 'name') and not value:
             raise ValueError(f'{field.upper() if field == "sku" else "Product name"} is required.')
     with db:
-        db.execute(f'UPDATE products SET {field}=? WHERE id=?', (value, product_id))
+        if field == 'qty':
+            from inventory_management import set_change_context, clear_change_context
+            set_change_context(db,'manual_edit','Direct inline stock correction',actor)
+        try:
+            db.execute(f'UPDATE products SET {field}=? WHERE id=?', (value, product_id))
+        finally:
+            if field == 'qty':clear_change_context(db)
     return value
 
 

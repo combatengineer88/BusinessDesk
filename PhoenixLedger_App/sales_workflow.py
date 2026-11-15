@@ -24,8 +24,11 @@ def convert_estimate(db, document_id, charge_credit=False):
         due=credit_due_date(db,doc_amount['customer_id']) if charge_credit else ''
         db.execute("UPDATE documents SET kind='Invoice',status='Open',credit_account=?,credit_due_on=? WHERE id=?",
                    (int(bool(charge_credit)),due,document_id))
+        from inventory_management import set_change_context,clear_change_context
+        set_change_context(db,'invoice_sale',f'Estimate converted to invoice #{document_id}')
         for pid,qty in required.items():
             db.execute('UPDATE products SET qty=qty-? WHERE id=?',(qty,pid))
+        clear_change_context(db)
         # Preserve original invoice/estimate date; conversion posts journal with that date.
         doc=db.execute('SELECT * FROM documents WHERE id=?',(document_id,)).fetchone()
         journal=db.execute('INSERT INTO journal(posted_on,memo,source_type,source_id) VALUES(?,?,?,?)',

@@ -132,6 +132,9 @@ def import_rows(db,kind,rows,mode='skip'):
         if key in keys:raise ValueError(f"Duplicate {kind[:-1]} in workbook on row {rownum}: {key}")
         keys.add(key)
     with db:
+        if kind=='products':
+            from inventory_management import set_change_context,clear_change_context
+            set_change_context(db,'excel_import',f'Product Excel {mode} import')
         for _,v in rows:
             if kind in ('customers','suppliers'):
                 table=kind
@@ -175,4 +178,6 @@ def import_rows(db,kind,rows,mode='skip'):
                                VALUES(?,?,?,?,?,?,?,?)""",
                                (v['sku'],v['name'],v['description'],v['price'],v['cost'],v['qty'],barcode,supplier_id))
                     created+=1
+        if kind=='products':
+            clear_change_context(db)
     return created,updated,skipped

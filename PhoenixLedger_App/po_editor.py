@@ -29,8 +29,8 @@ class PurchaseOrderEditor:
             po = db.execute('SELECT * FROM purchase_orders WHERE id=?', (po_id,)).fetchone()
             if po is None:
                 raise ValueError('Purchase order not found.')
-            if po['status'] != 'Open':
-                raise ValueError('Only Open purchase orders can be edited. Received orders already affect inventory and accounting.')
+            if po['status'] not in ('Open','Draft'):
+                raise ValueError('Only Draft or Open purchase orders can be edited. Received orders already affect inventory and accounting.')
             self.existing = po
             self.supplier_id = po['supplier_id']
             for line in db.execute('SELECT product_id,qty,unit_cost FROM po_items WHERE po_id=? ORDER BY id',

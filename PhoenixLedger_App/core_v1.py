@@ -295,11 +295,14 @@ class App:
                     from account_workflows import credit_due_date
                     self.db.execute('UPDATE documents SET credit_account=1,credit_due_on=? WHERE id=?',
                                     (credit_due_date(self.db,cid),docid))
+                from inventory_management import set_change_context,clear_change_context
+                if kind=='Invoice':set_change_context(self.db,'invoice_sale',f'Invoice #{docid}',self.user['username'])
                 for pid,desc,qty,unit,line in items:
                     self.db.execute("INSERT INTO document_items(document_id,product_id,description,qty,unit_price,line_total) VALUES(?,?,?,?,?,?)",
                                     (docid,pid,desc,qty,unit,line))
                     if kind=="Invoice":
                         self.db.execute("UPDATE products SET qty=qty-? WHERE id=?",(qty,pid))
+                if kind=='Invoice':clear_change_context(self.db)
             refresh()
         def payment():
             id=self.selected(tree)

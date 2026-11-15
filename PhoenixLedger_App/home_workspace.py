@@ -42,6 +42,9 @@ QUICK_LINKS = (
         ('Add new product', 'product.add'),
         ('Import products from Excel', 'product.import'),
         ('Edit product list', 'product.edit'),
+        ('Scan to adjust stock', 'product.scan'),
+        ('Inventory movement history', 'product.movements'),
+        ('Suggested reorder drafts', 'product.reorders'),
     )),
     ('MANAGEMENT', (
         ('Dashboard', 'dashboard'),

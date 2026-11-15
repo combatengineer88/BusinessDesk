@@ -78,8 +78,8 @@ def update_supplier_po(db, po_id, notes, items):
                         (po_id,)).fetchone()
         if po is None:
             raise ValueError('Purchase order no longer exists.')
-        if po['status'] != 'Open':
-            raise ValueError('Only open purchase orders may be edited. Received POs have already affected inventory and accounting.')
+        if po['status'] not in ('Open','Draft'):
+            raise ValueError('Only open purchase orders (or unapproved Draft purchase orders) may be edited. Received POs have already affected inventory and accounting.')
         supplier_id = po['supplier_id']
         originals = {row[0] for row in db.execute(
             'SELECT product_id FROM po_items WHERE po_id=?', (po_id,))}
@@ -103,6 +103,6 @@ def update_supplier_po(db, po_id, notes, items):
         db.executemany(
             'INSERT INTO po_items(po_id,product_id,qty,unit_cost) VALUES(?,?,?,?)',
             [(po_id, *line) for line in items])
-        db.execute('UPDATE purchase_orders SET notes=?,total=? WHERE id=? AND status=\'Open\'',
+        db.execute("UPDATE purchase_orders SET notes=?,total=? WHERE id=? AND status IN ('Open','Draft')",
                    (notes, total, po_id))
     return po_id
