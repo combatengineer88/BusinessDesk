@@ -38,7 +38,7 @@ from inventory_dialogs import (scan_to_adjust, show_history, configure_inventory
 from inventory_costing import ensure_schema as ensure_cost_schema, set_bulk_quote, set_manual_cost, margin_info, quote_for_qty
 from costing_dialogs import open_bulk_pricing_dialog
 
-VERSION = '3.6.0'
+VERSION = '3.6.1'
 BUSINESS = 'TDZIGNS LLC'
 RELEASE_MANIFEST_URL = 'https://github.com/combatengineer88/BusinessDesk/releases/latest/download/update_manifest.json'
 TRUSTED_RELEASE_PREFIX = 'https://github.com/combatengineer88/BusinessDesk/releases/download/'

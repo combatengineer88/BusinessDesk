@@ -10,6 +10,24 @@ def start():
     try:
         if '--smoke-test' in sys.argv:
             # GitHub's Windows runner executes this compiled EXE before release.
+            # Exercise Excel imports inside the *frozen* executable. openpyxl
+            # treats NumPy as optional; NumPy is excluded from this build to
+            # prevent a broken optional distribution from breaking XLSX imports.
+            from io import BytesIO
+            from openpyxl import Workbook, load_workbook
+            workbook = Workbook()
+            workbook.active.append(['SKU', 'Name', 'Price'])
+            workbook.active.append(['SMOKE-001', 'Excel import probe', 1.25])
+            buffer = BytesIO()
+            workbook.save(buffer)
+            workbook.close()
+            buffer.seek(0)
+            probe = load_workbook(buffer, read_only=True, data_only=True)
+            try:
+                if list(probe.active.values)[1] != ('SMOKE-001', 'Excel import probe', 1.25):
+                    raise RuntimeError('Excel read/write smoke test failed')
+            finally:
+                probe.close()
             from core_v1 import connect
             from businessdesk import schema
             conn = connect()
